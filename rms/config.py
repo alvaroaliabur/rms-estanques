@@ -1,6 +1,7 @@
 """
 RMS Estanques — Configuration
 All pricing parameters, property details, and system settings.
+UPDATED: Real Capa A preciosPorDisp from Beds24 historical data.
 """
 
 import os
@@ -47,35 +48,59 @@ SEASON_CODE = {
 }
 
 # ══════════════════════════════════════════
-# SEGMENT BASE (from Capa A — loaded dynamically)
-# These are fallback values; cargarCapaA_ overwrites them.
+# SEGMENT BASE — Real Capa A from production
+# preciosPorDisp: {1: price_1_free, ..., 9: price_9_free}
 # ══════════════════════════════════════════
 
 SEGMENT_BASE = {
-    "1-WD": {"code": "B", "base": 65, "suelo": 50, "techo": 110},
-    "1-WE": {"code": "B", "base": 75, "suelo": 55, "techo": 130},
-    "2-WD": {"code": "B", "base": 75, "suelo": 55, "techo": 120},
-    "2-WE": {"code": "B", "base": 85, "suelo": 60, "techo": 140},
-    "3-WD": {"code": "MB", "base": 80, "suelo": 60, "techo": 130},
-    "3-WE": {"code": "MB", "base": 90, "suelo": 65, "techo": 150},
-    "4-WD": {"code": "M", "base": 110, "suelo": 75, "techo": 180},
-    "4-WE": {"code": "M", "base": 120, "suelo": 80, "techo": 200},
-    "5-WD": {"code": "MA", "base": 130, "suelo": 90, "techo": 215},
-    "5-WE": {"code": "MA", "base": 145, "suelo": 100, "techo": 240},
-    "6-WD": {"code": "A", "base": 190, "suelo": 130, "techo": 315},
-    "6-WE": {"code": "A", "base": 210, "suelo": 145, "techo": 345},
-    "7-WD": {"code": "UA", "base": 370, "suelo": 330, "techo": 650},
-    "7-WE": {"code": "UA", "base": 410, "suelo": 330, "techo": 650},
-    "8-WD": {"code": "UA", "base": 440, "suelo": 390, "techo": 700},
-    "8-WE": {"code": "UA", "base": 480, "suelo": 390, "techo": 700},
-    "9-WD": {"code": "A", "base": 175, "suelo": 120, "techo": 290},
-    "9-WE": {"code": "A", "base": 195, "suelo": 135, "techo": 320},
-    "10-WD": {"code": "MA", "base": 130, "suelo": 90, "techo": 215},
-    "10-WE": {"code": "MA", "base": 145, "suelo": 100, "techo": 240},
-    "11-WD": {"code": "B", "base": 75, "suelo": 55, "techo": 125},
-    "11-WE": {"code": "B", "base": 85, "suelo": 60, "techo": 140},
-    "12-WD": {"code": "MB", "base": 95, "suelo": 65, "techo": 160},
-    "12-WE": {"code": "MB", "base": 105, "suelo": 70, "techo": 175},
+    "1-WD": {"code": "B", "base": 40, "suelo": 35, "techo": 105,
+             "preciosPorDisp": {1: 70, 2: 60, 3: 40, 4: 40, 5: 40, 6: 40, 7: 40, 8: 40, 9: 40}},
+    "1-WE": {"code": "B", "base": 40, "suelo": 35, "techo": 120,
+             "preciosPorDisp": {1: 80, 2: 60, 3: 60, 4: 40, 5: 40, 6: 40, 7: 40, 8: 40, 9: 40}},
+    "2-WD": {"code": "B", "base": 60, "suelo": 48, "techo": 150,
+             "preciosPorDisp": {1: 100, 2: 80, 3: 80, 4: 70, 5: 70, 6: 60, 7: 60, 8: 60, 9: 60}},
+    "2-WE": {"code": "B", "base": 60, "suelo": 48, "techo": 165,
+             "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 70, 6: 60, 7: 60, 8: 60, 9: 60}},
+    "3-WD": {"code": "MB", "base": 70, "suelo": 56, "techo": 165,
+             "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 80, 6: 70, 7: 70, 8: 70, 9: 70}},
+    "3-WE": {"code": "MB", "base": 70, "suelo": 56, "techo": 180,
+             "preciosPorDisp": {1: 120, 2: 90, 3: 80, 4: 80, 5: 70, 6: 70, 7: 70, 8: 70, 9: 70}},
+    "4-WD": {"code": "M", "base": 100, "suelo": 80, "techo": 195,
+             "preciosPorDisp": {1: 130, 2: 120, 3: 120, 4: 110, 5: 110, 6: 110, 7: 100, 8: 100, 9: 100}},
+    "4-WE": {"code": "M", "base": 100, "suelo": 80, "techo": 210,
+             "preciosPorDisp": {1: 140, 2: 130, 3: 120, 4: 120, 5: 110, 6: 110, 7: 100, 8: 100, 9: 100}},
+    "5-WD": {"code": "MA", "base": 110, "suelo": 88, "techo": 240,
+             "preciosPorDisp": {1: 160, 2: 140, 3: 130, 4: 130, 5: 120, 6: 110, 7: 110, 8: 110, 9: 110}},
+    "5-WE": {"code": "MA", "base": 120, "suelo": 88, "techo": 240,
+             "preciosPorDisp": {1: 160, 2: 160, 3: 140, 4: 130, 5: 130, 6: 120, 7: 110, 8: 110, 9: 110}},
+    "6-WD": {"code": "A", "base": 170, "suelo": 112, "techo": 345,
+             "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 170, 6: 170, 7: 160, 8: 140, 9: 140}},
+    "6-WE": {"code": "A", "base": 170, "suelo": 128, "techo": 360,
+             "preciosPorDisp": {1: 240, 2: 210, 3: 200, 4: 190, 5: 180, 6: 170, 7: 170, 8: 160, 9: 160}},
+    "7-WD": {"code": "UA", "base": 260, "suelo": 168, "techo": 495,
+             "preciosPorDisp": {1: 330, 2: 310, 3: 290, 4: 280, 5: 260, 6: 250, 7: 230, 8: 230, 9: 210}},
+    "7-WE": {"code": "UA", "base": 260, "suelo": 168, "techo": 480,
+             "preciosPorDisp": {1: 320, 2: 310, 3: 290, 4: 280, 5: 260, 6: 250, 7: 230, 8: 210, 9: 210}},
+    "8-WD": {"code": "UA", "base": 300, "suelo": 208, "techo": 615,
+             "preciosPorDisp": {1: 410, 2: 370, 3: 350, 4: 310, 5: 300, 6: 290, 7: 270, 8: 260, 9: 260}},
+    "8-WE": {"code": "UA", "base": 300, "suelo": 208, "techo": 570,
+             "preciosPorDisp": {1: 380, 2: 350, 3: 350, 4: 310, 5: 300, 6: 280, 7: 270, 8: 260, 9: 260}},
+    "9-WD": {"code": "A", "base": 180, "suelo": 136, "techo": 345,
+             "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 180, 6: 180, 7: 170, 8: 170, 9: 170}},
+    "9-WE": {"code": "A", "base": 180, "suelo": 136, "techo": 345,
+             "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 190, 6: 180, 7: 180, 8: 170, 9: 170}},
+    "10-WD": {"code": "MA", "base": 120, "suelo": 96, "techo": 255,
+              "preciosPorDisp": {1: 170, 2: 160, 3: 140, 4: 140, 5: 140, 6: 130, 7: 120, 8: 120, 9: 120}},
+    "10-WE": {"code": "MA", "base": 120, "suelo": 96, "techo": 255,
+              "preciosPorDisp": {1: 170, 2: 160, 3: 150, 4: 140, 5: 140, 6: 130, 7: 120, 8: 120, 9: 120}},
+    "11-WD": {"code": "B", "base": 70, "suelo": 56, "techo": 150,
+              "preciosPorDisp": {1: 100, 2: 100, 3: 90, 4: 80, 5: 80, 6: 70, 7: 70, 8: 70, 9: 70}},
+    "11-WE": {"code": "B", "base": 70, "suelo": 56, "techo": 165,
+              "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 80, 6: 80, 7: 70, 8: 70, 9: 70}},
+    "12-WD": {"code": "MB", "base": 120, "suelo": 96, "techo": 225,
+              "preciosPorDisp": {1: 150, 2: 120, 3: 120, 4: 120, 5: 120, 6: 120, 7: 120, 8: 120, 9: 120}},
+    "12-WE": {"code": "MB", "base": 120, "suelo": 96, "techo": 225,
+              "preciosPorDisp": {1: 150, 2: 140, 3: 120, 4: 120, 5: 120, 6: 120, 7: 120, 8: 120, 9: 120}},
 }
 
 CHECKPOINTS = [120, 105, 90, 75, 60, 45, 30, 21, 14, 10, 7, 3, 0]
@@ -125,12 +150,9 @@ SEASONAL_FLOOR = {
     "B": 75, "MB": 90, "M": 140, "MA": 165, "A": 235, "UA": 395,
 }
 
-# v7: ADR Genius 2025 / 0.85 = precio publicado mínimo
 MONTHLY_FLOOR = {
     1: 60, 2: 65, 3: 95, 4: 130, 5: 170, 6: 260,
-    7: 320,   # ADR real julio 2025: 272€ Genius → 320 publicado
-    8: 367,   # ADR real agosto 2025: 312€ Genius → 367 publicado
-    9: 280, 10: 175, 11: 70, 12: 85,
+    7: 320, 8: 367, 9: 280, 10: 175, 11: 70, 12: 85,
 }
 
 MONTHLY_CEILING = {
@@ -349,9 +371,9 @@ APIFY_CONFIG = {
     "SCRAPE_ROTATION": {
         "enabled": True,
         "MESES_POR_DIA": {
-            1: [1, 4],  # Lunes: abr + jul
-            3: [2, 5],  # Miércoles: may + ago
-            5: [3, 6],  # Viernes: jun + sep
+            1: [1, 4],
+            3: [2, 5],
+            5: [3, 6],
         },
         "MAX_MESES_POR_EJECUCION": 2,
     },
