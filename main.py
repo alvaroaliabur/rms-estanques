@@ -1,12 +1,11 @@
 """
 RMS Estanques v7 — Main Entry Point
 ====================================
-Two modes:
-  1. CRON: Railway runs this daily at 05:00 UTC → full pricing run
+Runs as a web server with:
+  1. CRON: APScheduler runs full pricing daily at 05:00 UTC
   2. WEBHOOK: Beds24 sends POST on booking/cancellation → instant repricing
-
-If PORT env var is set, runs as a web server (webhook mode).
-If not, runs the cron job and exits.
+  3. /health endpoint for monitoring
+  4. /run endpoint for manual trigger
 """
 
 import sys
@@ -25,7 +24,7 @@ log = logging.getLogger("RMS")
 
 
 # ══════════════════════════════════════════
-# FULL PRICING RUN (cron job)
+# FULL PRICING RUN (daily cron)
 # ══════════════════════════════════════════
 
 def run_full():
@@ -115,8 +114,7 @@ def run_full():
 # ══════════════════════════════════════════
 
 def run_repricing(webhook_data):
-    """Quick repricing triggered by Beds24 webhook.
-    Only recalculates affected dates, not all 365."""
+    """Quick repricing triggered by Beds24 webhook."""
     start = datetime.now()
     from rms import config
 
@@ -126,93 +124,75 @@ def run_repricing(webhook_data):
 
     log.info("── WEBHOOK REPRICING ──")
 
-    # Extract affected dates from webhook
-    arrival = webhook_data.get("arrival", "")
-    departure = webhook_data.get("departure", "")
-    booking_id = webhook_data.get("id", "unknown")
-    status = webhook_data.get("status", "")
+    # V1 webhooks don't include booking data in body
+    # We just recalculate everything — it's fast (12 seconds)
+    booking_id = webhook_data.get("id", "unknown") if webhook_data else "unknown"
+    log.info(f"  Trigger: booking {booking_id}")
 
-    if not arrival or not departure:
-        log.warning(f"  Webhook sin fechas: booking {booking_id}")
-        return {"status": "no_dates"}
-
-    log.info(f"  Booking {booking_id}: {arrival} → {departure} (status: {status})")
-
-    # Calculate date range to reprice (affected dates + 3 days buffer)
-    from rms.utils import parse_date, fmt, add_days
-    ci = parse_date(arrival)
-    co = parse_date(departure)
-    range_start = add_days(ci, -3)  # 3 days before check-in
-    range_end = add_days(co, 3)     # 3 days after check-out
-    today = date.today()
-    if range_start < today:
-        range_start = today
-
-    # Full data load (quick — takes ~2 seconds)
     from rms.otb import read_otb
     from rms.capa_a import cargar_capa_a
     from rms.events import build_events
     from rms.pricing import calcular_precios_v7
+    from rms.apply import aplicar_precios
 
     otb = read_otb()
     cargar_capa_a()
     events = build_events()
-
-    # Calculate all prices (the engine is fast, 365 days in <1s)
     results = calcular_precios_v7(otb, events)
 
-    # Filter to only affected dates
-    affected = [r for r in results
-                if range_start <= parse_date(r["date"]) <= range_end]
+    audit = _audit(results)
+    if not audit["ok"]:
+        log.error(f"  ❌ Repricing audit failed: {audit['alertas']}")
+        return {"status": "audit_failed", "alertas": audit["alertas"]}
 
-    if not affected:
-        log.info("  No hay fechas afectadas en el horizonte")
-        return {"status": "no_affected_dates"}
-
-    # Apply only affected dates
-    from rms.apply import aplicar_precios
-    aplicar_precios(affected)
+    aplicar_precios(results)
 
     elapsed = (datetime.now() - start).total_seconds()
-    log.info(f"  ✅ Repricing: {len(affected)} fechas actualizadas en {elapsed:.1f}s")
+    log.info(f"  ✅ Repricing: {len(results)} fechas en {elapsed:.1f}s")
 
     return {
         "status": "ok",
-        "booking_id": booking_id,
-        "dates_updated": len(affected),
-        "range": f"{fmt(range_start)} → {fmt(range_end)}",
+        "dates_updated": len(results),
         "elapsed_seconds": round(elapsed, 1),
     }
 
 
 # ══════════════════════════════════════════
-# WEB SERVER (for webhook reception)
+# WEB SERVER + SCHEDULER
 # ══════════════════════════════════════════
 
 def start_server():
-    """Start Flask web server to receive Beds24 webhooks."""
+    """Start Flask web server with APScheduler for daily cron."""
     from flask import Flask, request, jsonify
+    from apscheduler.schedulers.background import BackgroundScheduler
 
     app = Flask(__name__)
 
+    # ── Scheduler: daily full run at 05:00 UTC ──
+    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler.add_job(run_full, "cron", hour=5, minute=0, id="daily_pricing")
+    scheduler.start()
+    log.info("⏰ Scheduler: daily full run at 05:00 UTC")
+
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "ok", "service": "RMS Estanques v7"})
+        return jsonify({
+            "status": "ok",
+            "service": "RMS Estanques v7",
+            "next_run": str(scheduler.get_job("daily_pricing").next_run_time),
+        })
 
-    @app.route("/webhook/booking", methods=["POST"])
+    @app.route("/webhook/booking", methods=["POST", "GET"])
     def webhook_booking():
         """Receive Beds24 booking webhook and trigger repricing."""
         try:
-            data = request.get_json(force=True, silent=True)
-            if not data:
-                data = {}
-
-            # Beds24 can send an array or a single object
-            if isinstance(data, list):
-                data = data[0] if data else {}
+            data = {}
+            if request.method == "POST":
+                data = request.get_json(force=True, silent=True) or {}
+                if isinstance(data, list):
+                    data = data[0] if data else {}
 
             log.info(f"📨 Webhook recibido: booking {data.get('id', '?')}")
-
             result = run_repricing(data)
             return jsonify(result), 200
 
@@ -221,9 +201,9 @@ def start_server():
             log.error(traceback.format_exc())
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/run", methods=["POST"])
+    @app.route("/run", methods=["POST", "GET"])
     def manual_run():
-        """Manual trigger for full pricing run (for testing)."""
+        """Manual trigger for full pricing run."""
         try:
             success = run_full()
             return jsonify({"status": "ok" if success else "failed"}), 200
@@ -231,7 +211,7 @@ def start_server():
             return jsonify({"status": "error", "message": str(e)}), 500
 
     port = int(os.getenv("PORT", 8080))
-    log.info(f"🌐 Servidor webhook arrancado en puerto {port}")
+    log.info(f"🌐 Servidor arrancado en puerto {port}")
     app.run(host="0.0.0.0", port=port)
 
 
@@ -292,16 +272,4 @@ def _send_error_email(msg):
 # ══════════════════════════════════════════
 
 if __name__ == "__main__":
-    # If PORT is set, run as web server (webhook mode)
-    # If not, run cron job and exit
-    if os.getenv("PORT"):
-        start_server()
-    else:
-        try:
-            success = run_full()
-            sys.exit(0 if success else 1)
-        except Exception as e:
-            log.error(f"❌ Error fatal: {e}")
-            log.error(traceback.format_exc())
-            _send_error_email(f"Error fatal: {e}\n\n{traceback.format_exc()}")
-            sys.exit(1)
+    start_server()
