@@ -30,14 +30,14 @@ COMP_SET_URLS = [
     "https://www.booking.com/hotel/es/blue-house-mallorca.es.html",
     "https://www.booking.com/hotel/es/apartamentos-ibiza-colonia-de-sant-jordi1.es.html",
     "https://www.booking.com/hotel/es/villa-piccola-by-cassai.es.html",
-    "https://www.booking.com/hotel/es/apartamentos-cala-figuera-cala-figuera.es.html",
-    "https://www.booking.com/hotel/es/carrer-de-l-esglesia-1.es.html",
+    "https://www.booking.com/hotel/es/edificio-puerto.es.html",
+    "https://www.booking.com/hotel/es/apartamentos-lago.es.html",
 ]
 
 COMP_SET_NAMES = [
     "Apartamentos Piza", "Apartamentos Lemar", "Aparthotel Isla de Cabrera",
     "Blue House Mallorca", "Apartamentos Ibiza", "Villa Piccola by Cassai",
-    "Apartamentos Cala Figuera", "Apartamentos Villa Sirena",
+    "Apartaments Edificio Puerto", "Apartamentos Lago",
 ]
 
 # Scrape windows: days ahead to check
