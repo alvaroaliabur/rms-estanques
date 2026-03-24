@@ -160,7 +160,7 @@ def get_comp_set():
         "currency": "native",
     })
     
-    if data and data.get("data"):
+    if data and data.get("results"):
         listings = data["data"]
         log.info(f"  📊 Comp set: {len(listings)} propiedades encontradas")
         
@@ -243,14 +243,14 @@ def actualizar_market_intelligence():
     
     # 2. Occupancy by month
     occ = get_market_occupancy()
-    if occ and occ.get("data"):
+    if occ and occ.get("results"):
         intelligence["occupancy"] = occ["data"]
         # Update config with fresh market occupancy
         _update_market_occ(occ["data"])
     
     # 3. ADR by month
     adr = get_market_adr()
-    if adr and adr.get("data"):
+    if adr and adr.get("results"):
         intelligence["adr"] = adr["data"]
         # Update ADR_PEER with real market data
         _update_market_adr(adr["data"])
