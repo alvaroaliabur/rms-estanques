@@ -1,5 +1,7 @@
 """
 RMS v7 Pricing Engine — Forecast → Optimize → Execute → Smooth
+v7.1: + Unconstrained Demand Estimation in optimize()
+
 Replaces: calcularPrecios_v7, forecast_v7_, optimizar_v7_, ejecutar_v7_, suavizarPrecios_v7_
 """
 
@@ -35,6 +37,109 @@ def get_season_code(d):
         from rms.utils import parse_date
         d = parse_date(d)
     return config.SEASON_CODE[d.month]
+
+
+# ══════════════════════════════════════════
+# UNCONSTRAINED DEMAND ESTIMATION
+# ══════════════════════════════════════════
+# 
+# Problem: When August historically had 94% occupancy, the Capa A
+# recorded "sold 9 at 350€" as max demand. But real demand was
+# higher — people wanted to book but no inventory was available.
+# The demand curve is truncated at capacity (9 units).
+#
+# Solution: For segments with high historical occupancy (>85%),
+# we estimate how much demand was invisible using the
+# Weatherford & Bodily method (industry standard):
+#
+#   unconstrained_demand = observed_demand / (1 - P(turnaway))
+#
+# Where P(turnaway) is estimated from historical occupancy.
+# This translates to a price uplift for low-availability dates.
+#
+# Implementation: We apply the uplift at optimize() time, 
+# BEFORE floors/ceilings, so it compounds with event factors
+# and other adjustments. Only affects dates with 1-3 units free.
+#
+# The uplift is conservative: max +25% for segments at 95% occ.
+# This is LESS than what a full unconstrained demand rebuild would
+# give, but it's safe to apply immediately without recalibrating
+# the entire Capa A.
+
+# Config for unconstrained demand — can be moved to config.py later
+UNCONSTRAINED_DEMAND = {
+    "enabled": True,
+    "occ_threshold": 0.85,     # Only inflate segments above this
+    "max_uplift": 1.25,        # Maximum price multiplier
+    "max_disp_affected": 3,    # Only affect dates with 1-3 units free
+    "method": "proportional",  # proportional to (occ - threshold)
+}
+
+# Pre-computed historical occupancy by segment (from CapaA_Precios)
+# These come from the GAS Capa A calibration. Format: segment -> occ%
+SEGMENT_OCC_HIST = {
+    "1-WD": 27.8, "1-WE": 35.8,
+    "2-WD": 87.2, "2-WE": 90.3,
+    "3-WD": 91.9, "3-WE": 84.0,
+    "4-WD": 92.4, "4-WE": 88.9,
+    "5-WD": 87.3, "5-WE": 92.2,
+    "6-WD": 87.4, "6-WE": 93.1,
+    "7-WD": 94.2, "7-WE": 90.3,
+    "8-WD": 94.2, "8-WE": 94.4,
+    "9-WD": 89.9, "9-WE": 94.4,
+    "10-WD": 88.9, "10-WE": 86.4,
+    "11-WD": 85.7, "11-WE": 86.4,
+    "12-WD": 42.0, "12-WE": 48.6,
+}
+
+
+def get_unconstrained_uplift(segment, disponibles):
+    """
+    Calculate price uplift factor for unconstrained demand.
+    
+    Returns a multiplier >= 1.0.
+    Only applies when:
+    - Segment had high historical occupancy (demand was truncated)
+    - Current availability is low (1-3 units)
+    
+    The logic: if 8-WD had 94.2% occ, roughly 6% of demand was
+    turned away. With only 1 unit left, the marginal guest is 
+    willing to pay MORE than the historical price suggests,
+    because the Capa A underestimates demand at that price point.
+    
+    Uplift formula (Weatherford simplified):
+      P(turnaway) = max(0, (occ_hist - threshold) / (1 - threshold))
+      uplift = 1 + P(turnaway) * scarcity_factor
+    
+    Where scarcity_factor increases as availability decreases:
+      1 unit free -> full uplift
+      2 units free -> 60% of uplift  
+      3 units free -> 30% of uplift
+    """
+    cfg = UNCONSTRAINED_DEMAND
+    if not cfg["enabled"]:
+        return 1.0
+    
+    if disponibles > cfg["max_disp_affected"]:
+        return 1.0
+    
+    occ_hist = SEGMENT_OCC_HIST.get(segment, 0) / 100.0  # Convert from % to ratio
+    
+    if occ_hist < cfg["occ_threshold"]:
+        return 1.0
+    
+    # Probability of turnaway — how much demand was invisible
+    p_turnaway = (occ_hist - cfg["occ_threshold"]) / (1 - cfg["occ_threshold"])
+    p_turnaway = min(p_turnaway, 1.0)
+    
+    # Scarcity factor — more uplift when fewer units available
+    scarcity = {1: 1.0, 2: 0.60, 3: 0.30}
+    scarcity_factor = scarcity.get(disponibles, 0.0)
+    
+    # Final uplift
+    uplift = 1.0 + p_turnaway * scarcity_factor * (cfg["max_uplift"] - 1.0)
+    
+    return round(min(uplift, cfg["max_uplift"]), 3)
 
 
 # ══════════════════════════════════════════
@@ -111,7 +216,7 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
 
 
 # ══════════════════════════════════════════
-# MODULE 2: OPTIMIZE
+# MODULE 2: OPTIMIZE (with Unconstrained Demand)
 # ══════════════════════════════════════════
 
 def optimize(fecha, fc, otb):
@@ -150,6 +255,14 @@ def optimize(fecha, fc, otb):
             precio_base * cfg_opt["PESO_REAL"] + precio_forecast * cfg_opt["PESO_FORECAST"]
         )
 
+    # ★ NEW: Unconstrained Demand Uplift ★
+    # If this segment historically had high occupancy, the Capa A
+    # underestimates demand at high prices. We correct by inflating
+    # the price for low-availability dates.
+    unc_uplift = get_unconstrained_uplift(seg, disponibles)
+    if unc_uplift > 1.0:
+        precio_base = round(precio_base * unc_uplift)
+
     # Comp set adjustment
     ajuste_cs = _comp_set_adjustment(date_str, precio_base)
     precio_base = round(precio_base * ajuste_cs)
@@ -161,6 +274,7 @@ def optimize(fecha, fc, otb):
         "dispVirtual": disp_virtual,
         "ajusteCompSet": ajuste_cs,
         "segment": seg,
+        "uncUplift": unc_uplift,  # Track for logging/debugging
     }
 
 
@@ -402,6 +516,7 @@ def calcular_precios_v7(otb, events):
 
     today = date.today()
     results = []
+    unc_count = 0  # Track how many dates got unconstrained uplift
 
     for di in range(config.PRICING_HORIZON):
         d = today + timedelta(days=di)
@@ -410,8 +525,11 @@ def calcular_precios_v7(otb, events):
         # Step 1: Forecast
         fc = forecast(d, fill_curves, pace_data, pickup_data, otb, events)
 
-        # Step 2: Optimize
+        # Step 2: Optimize (now includes unconstrained demand)
         opt = optimize(d, fc, otb)
+        
+        if opt.get("uncUplift", 1.0) > 1.0:
+            unc_count += 1
 
         # Step 3: Execute
         ej = execute(d, opt["precioNeto"], fc, otb, sold_prices, gaps)
@@ -454,6 +572,7 @@ def calcular_precios_v7(otb, events):
             "fOTB": 1.0, "fPickup": 1.0, "fPace": 1.0, "fTotal": 1.0,
             "paceRatio": fc["desglose"]["pace"],
             "marketFactor": 1.0,
+            "uncUplift": opt.get("uncUplift", 1.0),
         })
 
     # Step 4: Smooth
@@ -464,4 +583,6 @@ def calcular_precios_v7(otb, events):
         r["precioGenius"] = round(r["precioFinal"] * 0.85)
 
     log.info(f"  ✅ v7: {len(results)} días calculados")
+    if unc_count > 0:
+        log.info(f"  📈 Demanda no restringida: {unc_count} fechas con uplift aplicado")
     return results
