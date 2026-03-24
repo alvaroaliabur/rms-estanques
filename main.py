@@ -61,7 +61,7 @@ def run_full():
     from rms.vacaciones import check_and_update_vacaciones
     from rms.events import build_events
     from rms.pricing import calcular_precios_v7
-    from rms.alerts import check_anomalies
+    from rms.alerts import run_alerts
     from rms.apply import aplicar_precios
     from rms.email_report import enviar_email_diario
     from rms.revenue import calcular_revenue_tracker, record_prices, check_feedback
@@ -159,7 +159,7 @@ def run_full():
         
         # Step 12: Alerts
         log.info("\n── STEP 12: Alertas ──")
-        alerts = check_anomalies(results, otb)
+        alerts = run_alerts(otb)
         
         # Step 13: Email
         log.info("\n── STEP 13: Email diario ──")
