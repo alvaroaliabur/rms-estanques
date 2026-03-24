@@ -34,7 +34,8 @@ PROPERTY_LNG = 2.9889
 MARKET = {
     "country": "Spain",
     "region": "Balearic Islands",
-    "locality": "Colònia de Sant Jordi",
+    "locality": "ses Salines",
+    "district": "Colònia de Sant Jordi",
 }
 
 # Cache to avoid redundant API calls within same day
@@ -148,7 +149,7 @@ def get_comp_set():
     data = _api_post("listings/search/radius", {
         "latitude": PROPERTY_LAT,
         "longitude": PROPERTY_LNG,
-        "radius": 2,  # miles
+        "radius_miles": 2,
         "filter": {
             "room_type": {"eq": "entire_home"},
             "bedrooms": {"range": [1, 4]},
