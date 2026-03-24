@@ -333,6 +333,22 @@ def email_view():
         return "<h1>No email generated yet. Hit /run first.</h1>", 404
     return email["html"]
 
+@app.route("/market/test")
+def market_test():
+    import requests as req
+    key = os.getenv("AIRROI_API_KEY", "")
+    headers = {"X-API-KEY": key}
+    results = {}
+    # Test 1: Search by name
+    r1 = req.get("https://api.airroi.com/markets/search?query=Mallorca", headers=headers, timeout=15)
+    results["mallorca"] = r1.json() if r1.status_code == 200 else r1.text
+    # Test 2: Search by coordinates
+    r2 = req.get("https://api.airroi.com/markets/lookup?latitude=39.3167&longitude=2.9889", headers=headers, timeout=15)
+    results["coords"] = r2.json() if r2.status_code == 200 else r2.text
+    # Test 3: Search Ses Salines (municipality)
+    r3 = req.get("https://api.airroi.com/markets/search?query=Ses%20Salines", headers=headers, timeout=15)
+    results["ses_salines"] = r3.json() if r3.status_code == 200 else r3.text
+    return jsonify(results)
 
 # ══════════════════════════════════════════
 # SCHEDULER
