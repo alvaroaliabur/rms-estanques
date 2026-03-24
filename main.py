@@ -54,7 +54,7 @@ def run_full():
     global _last_results, _last_audit, _last_claude
     
     from rms import config
-    from rms.beds24 import connect
+    from rms.beds24 import get_token
     from rms.otb import read_otb
     from rms.capa_a import cargar_capa_a, check_and_recalibrate
     from rms.compset import check_and_update_comp_set
@@ -75,7 +75,7 @@ def run_full():
     try:
         # Step 1: Connect Beds24
         log.info("\n── STEP 1: Conectar Beds24 ──")
-        token = connect()
+        token = get_token()
         if not token:
             log.error("  ❌ No se pudo conectar a Beds24")
             return
