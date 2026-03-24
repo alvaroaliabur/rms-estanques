@@ -59,7 +59,7 @@ def run_full():
     from rms.capa_a import cargar_capa_a, check_and_recalibrate
     from rms.compset import check_and_update_comp_set
     from rms.vacaciones import check_and_update_vacaciones
-    from rms.events import cargar_eventos
+    from rms.events import build_events
     from rms.pricing import calcular_precios_v7
     from rms.alerts import check_anomalies
     from rms.apply import aplicar_precios
@@ -109,7 +109,7 @@ def run_full():
         log.info("\n── STEP 5: Cargar datos ──")
         otb = read_otb()
         log.info(f"  ✅ OTB: {len(otb)} fechas")
-        events = cargar_eventos()
+        events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
         
         # Step 6: Calculate prices v7
