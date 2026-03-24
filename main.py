@@ -70,6 +70,9 @@ def run_full():
     for w in audit["warnings"]:
         log.warning(f"  ⚠️ {w}")
 
+    # Step 4b: Claude optimization
+    from rms.claude_api import optimize_with_claude
+    results = optimize_with_claude(results, otb)  
     if config.DRY_RUN:
         log.info("  🔒 DRY RUN — precios NO aplicados")
     else:
