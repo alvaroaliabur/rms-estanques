@@ -156,7 +156,7 @@ def get_comp_set():
             "rating_overall": {"gte": 4.0},
         },
         "sort": {"ttm_revenue": "desc"},
-        "pagination": {"page_size": 20, "offset": 0},
+        "pagination": {"page_size": 10, "offset": 0},
         "currency": "native",
     })
     
