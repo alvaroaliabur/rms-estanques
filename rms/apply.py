@@ -1,244 +1,189 @@
 """
-Apply prices to Beds24 — writes calendar data via API.
-Replaces: aplicarPrecios_, getSlotsBySeasonCode_, getDynamicDurationDiscount_,
-          getGroundFloorPremium_, readGroundFloorOTB_, detectGroundFloorGaps_
+Apply Prices — Write prices to Beds24 via API
+v7.1: Full implementation with duration discount slots
+
+Replaces: aplicarPrecios_, aplicarPreciosFecha_
+
+PRICE SLOTS in Beds24:
+- price1: Standard rate (base price, what /prices/compare shows)
+- price3: 6-night rate
+- price4: 5-night rate  
+- price5: 4-night rate
+- price10: Weekly (7+ night) rate
+
+DURATION DISCOUNTS:
+Discounts compress as occupancy rises (scarce inventory = less discount).
+At 75%+ occupancy, discounts shrink to minimum levels.
+
+BEDS24 API:
+- POST /properties/{id}/rooms/{roomId}/offer1/calendar
+- Body: [{date, price1, price3, price4, price5, price10, minStay}]
+- Must set both UPPER (8 units) and GROUND (1 unit) rooms
 """
 
-import time
 import logging
-from datetime import date, timedelta
+from datetime import date
 from rms import config
-from rms.beds24 import api_post, api_get_all
-from rms.utils import fmt, parse_date, is_weekend
+from rms.beds24 import api_post
+from rms.utils import clamp
 
 log = logging.getLogger(__name__)
 
 
-def get_slots_by_season(sc):
-    if sc == "UA":
-        return {"STANDARD": False, "4NOCHES": False, "5NOCHES": False, "6NOCHES": True, "SEMANAL": True}
-    if sc == "A":
-        return {"STANDARD": False, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
-    if sc == "MA":
-        return {"STANDARD": False, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
-    return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+# ══════════════════════════════════════════
+# DURATION DISCOUNTS
+# ══════════════════════════════════════════
+
+# Dynamic discounts: compress as occupancy rises
+DURATION_DISCOUNTS = {
+    "4NOCHES": {"base": 0.82, "min": 0.90},    # 18% off at low occ → 10% off at high occ
+    "5NOCHES": {"base": 0.75, "min": 0.85},    # 25% off → 15% off
+    "6NOCHES": {"base": 0.68, "min": 0.80},    # 32% off → 20% off
+    "SEMANAL":  {"base": 0.60, "min": 0.75},    # 40% off → 25% off
+}
+
+# Floor factors: duration floors can be lower than standard floor
+DURATION_FLOOR_FACTOR = {
+    "4NOCHES": 0.92,
+    "5NOCHES": 0.85,
+    "6NOCHES": 0.78,
+    "SEMANAL":  0.70,
+}
+
+OCC_LOW = 0.30   # Below this → full discount
+OCC_HIGH = 0.75  # Above this → minimum discount
 
 
-def get_dynamic_duration_discount(slot_name, occupancy, days_out, season_code):
-    dyn = config.DURATION_DISCOUNTS_DYNAMIC.get(slot_name)
-    if not dyn:
-        return config.DURATION_DISCOUNTS.get(slot_name, 1)
-
-    if days_out is None:
-        days_out = 60
-
-    # Discount by occupancy
-    if occupancy <= config.DURATION_DISCOUNT_OCC_LOW:
-        disc = dyn["base"]
-    elif occupancy >= config.DURATION_DISCOUNT_OCC_HIGH:
-        disc = dyn["min"]
+def calc_duration_price(base_price, slot_name, occ, suelo):
+    """
+    Calculate duration-discounted price for a slot.
+    
+    Discount compresses as occupancy rises:
+    - At 30% occ → base discount (e.g., -25% for 5NOCHES)
+    - At 75% occ → min discount (e.g., -15% for 5NOCHES)
+    - Between → linear interpolation
+    
+    Floor protection: each duration slot has its own floor
+    (slightly lower than standard to allow discounts to show).
+    """
+    disc = DURATION_DISCOUNTS.get(slot_name)
+    if not disc:
+        return base_price
+    
+    # Interpolate discount factor based on occupancy
+    if occ <= OCC_LOW:
+        factor = disc["base"]
+    elif occ >= OCC_HIGH:
+        factor = disc["min"]
     else:
-        disc = dyn["base"] + (dyn["min"] - dyn["base"]) * (
-            (occupancy - config.DURATION_DISCOUNT_OCC_LOW) /
-            (config.DURATION_DISCOUNT_OCC_HIGH - config.DURATION_DISCOUNT_OCC_LOW)
-        )
-
-    # Modulate by days out
-    if days_out > 90:
-        if season_code in ("UA", "A"):
-            return dyn["min"] + (1 - dyn["min"]) * 0.4
-        return dyn["min"]
-    elif days_out > 30:
-        urgency_pct = (90 - days_out) / 60
-        return dyn["min"] + (disc - dyn["min"]) * urgency_pct
-    elif days_out > 14:
-        return disc
-    else:
-        extra_urgency = (14 - days_out) / 14
-        extra_discount = dyn["base"] - 0.05 * extra_urgency
-        return min(disc, extra_discount)
+        ratio = (occ - OCC_LOW) / (OCC_HIGH - OCC_LOW)
+        factor = disc["base"] + (disc["min"] - disc["base"]) * ratio
+    
+    price = round(base_price * factor)
+    
+    # Apply duration-specific floor
+    floor_factor = DURATION_FLOOR_FACTOR.get(slot_name, 1.0)
+    duration_floor = round(suelo * floor_factor)
+    
+    return max(price, duration_floor)
 
 
-def get_ground_floor_premium(result):
-    sc = result.get("seasonCode", "M")
-    days_out = result.get("daysOut", 90)
-    premiums = {"UA": 1.08, "A": 1.07, "MA": 1.06, "M": 1.05, "MB": 1.03, "B": 1.02}
-    bp = premiums.get(sc, 1.05)
+# ══════════════════════════════════════════
+# APPLY TO BEDS24
+# ══════════════════════════════════════════
 
-    if days_out <= 7:
-        bp = 1.00 + (bp - 1.00) * 0.25
-    elif days_out <= 14:
-        bp = 1.00 + (bp - 1.00) * 0.50
-    elif days_out <= 21:
-        bp = 1.00 + (bp - 1.00) * 0.75
-    return bp
-
-
-def read_ground_floor_otb():
-    """Read GroundFloor-specific OTB."""
-    today = date.today()
-    end = today + timedelta(days=config.PRICING_HORIZON)
-
-    all_bks = api_get_all("bookings", {
-        "arrivalFrom": fmt(today), "departureTo": fmt(end),
-        "propertyId": config.PROPERTY_ID, "roomId": config.ROOM_GROUND,
-    })
-    active = api_get_all("bookings", {
-        "departureFrom": fmt(today), "arrivalTo": fmt(today),
-        "propertyId": config.PROPERTY_ID, "roomId": config.ROOM_GROUND,
-    })
-    if active:
-        all_bks.extend(active)
-
-    from rms.otb import es_cancelada
-    otb = {}
-    seen = set()
-    for b in all_bks:
-        if not b.get("arrival") or not b.get("departure"):
-            continue
-        if es_cancelada(b):
-            continue
-        bid = b.get("id")
-        if bid in seen:
-            continue
-        seen.add(bid)
-        if b.get("roomId") and b["roomId"] != config.ROOM_GROUND:
-            continue
-
-        ci = parse_date(b["arrival"])
-        co = parse_date(b["departure"])
-        d = max(ci, today)
-        while d < co:
-            if d > end:
-                break
-            otb[fmt(d)] = 1
-            d += timedelta(days=1)
-
-    log.info(f"  GroundFloor OTB: {len(otb)} fechas con reserva")
-    return otb
-
-
-def detect_ground_floor_gaps(gf_otb):
-    """Detect gaps in GroundFloor bookings."""
-    today = date.today()
-    gaps = {}
-    di = 0
-
-    while di < config.PRICING_HORIZON:
-        d = today + timedelta(days=di)
-        ds = fmt(d)
-        if gf_otb.get(ds):
-            di += 1
-            continue
-
-        # Count gap length
-        gap_start = ds
-        gap_dates = []
-        gap_len = 0
-        while di + gap_len < config.PRICING_HORIZON and gap_len <= 30:
-            gd = today + timedelta(days=di + gap_len)
-            gds = fmt(gd)
-            if gf_otb.get(gds):
-                break
-            gap_dates.append(gds)
-            gap_len += 1
-
-        if 2 <= gap_len <= 30:
-            sc = config.SEASON_CODE[d.month]
-            default_ms = config.DEFAULT_MIN_STAY.get(sc, 3)
-            if gap_len < default_ms:
-                ms_gap = gap_len
-                prem = 1.15 if gap_len == 2 else 1.08
-            else:
-                ms_gap = default_ms
-                prem = 1.00
-
-            for gds in gap_dates:
-                gaps[gds] = {
-                    "gapLength": gap_len, "gapStart": gap_start,
-                    "minStayGap": ms_gap, "premiumGap": prem,
-                }
-
-        di += max(1, gap_len)
-
-    return gaps
+def build_calendar_entry(result):
+    """
+    Build a single calendar entry for Beds24 API.
+    
+    Returns dict with date, price1, price3, price4, price5, price10, minStay.
+    """
+    d = result["date"]
+    base = result["precioFinal"]
+    suelo = result.get("suelo", 50)
+    occ = result.get("occNow", 0)
+    min_stay = result.get("minStay", 3)
+    
+    entry = {
+        "date": d,
+        "price1": base,                                              # Standard
+        "price3": calc_duration_price(base, "6NOCHES", occ, suelo),  # 6-night
+        "price4": calc_duration_price(base, "5NOCHES", occ, suelo),  # 5-night
+        "price5": calc_duration_price(base, "4NOCHES", occ, suelo),  # 4-night
+        "price10": calc_duration_price(base, "SEMANAL", occ, suelo), # Weekly
+        "minStay": min_stay,
+    }
+    
+    return entry
 
 
 def aplicar_precios(results):
-    """Apply calculated prices to Beds24 calendar."""
+    """
+    Apply all calculated prices to Beds24.
+    
+    Sets prices for both room types:
+    - ROOM_UPPER (269521): 8 upper floor apartments
+    - ROOM_GROUND (269520): 1 ground floor apartment
+    
+    Ground floor uses same prices but may have different minStay
+    (controlled by GROUND_FLOOR_LOS config).
+    """
     if config.DRY_RUN:
-        log.info("  DRY RUN — prices not applied")
-        return
-
-    # GroundFloor OTB + gaps
-    gf_otb = {}
-    gf_gaps = {}
-    if config.GROUND_FLOOR_LOS["enabled"]:
-        gf_otb = read_ground_floor_otb()
-        gf_gaps = detect_ground_floor_gaps(gf_otb)
-
-    calendar_updates = {config.ROOM_UPPER: [], config.ROOM_GROUND: []}
-
+        log.info("  🔒 DRY RUN — precios NO aplicados")
+        return {"applied": False, "reason": "DRY_RUN"}
+    
+    if not results:
+        log.warning("  No results to apply")
+        return {"applied": False, "reason": "no_results"}
+    
+    log.info(f"  Aplicando precios a Beds24 ({len(results)} fechas)...")
+    
+    # Build calendar entries
+    calendar_upper = []
+    calendar_ground = []
+    
     for r in results:
-        std_price = r["precioFinal"]
-        open_slots = get_slots_by_season(r["seasonCode"])
-        seasonal_floor = r.get("seasonalFloor", r["suelo"])
-
-        # Build price slots
-        price_slots = {}
-        price_slots[config.PRICE_SLOTS["STANDARD"]] = std_price if open_slots["STANDARD"] else 9999
-
-        apply_dd = r["seasonCode"] in ("B", "MB", "M", "MA")
-        for slot_name in ("4NOCHES", "5NOCHES", "6NOCHES", "SEMANAL"):
-            slot_key = config.PRICE_SLOTS[slot_name]
-            if open_slots[slot_name]:
-                if apply_dd:
-                    sp = round(std_price * get_dynamic_duration_discount(
-                        slot_name, r.get("occNow", 0), r.get("daysOut"), r["seasonCode"]))
-                else:
-                    sp = std_price
-                dur_floor = seasonal_floor
-                if config.DURATION_FLOOR_FACTOR.get(slot_name):
-                    dur_floor = max(35, round(seasonal_floor * config.DURATION_FLOOR_FACTOR[slot_name]))
-                if sp < dur_floor:
-                    sp = dur_floor
-                price_slots[slot_key] = sp
-            else:
-                price_slots[slot_key] = 9999
-
-        # Ground floor premium
-        gp = get_ground_floor_premium(r)
-        upper_slots = dict(price_slots)
-        ground_slots = {k: (9999 if v == 9999 else round(v * gp)) for k, v in price_slots.items()}
-
-        # Upper floor entry
-        entry_upper = {"from": r["date"], "to": r["date"], "minStay": r["minStay"]}
-        entry_upper.update(upper_slots)
-        calendar_updates[config.ROOM_UPPER].append(entry_upper)
-
-        # Ground floor minStay
-        ground_ms = config.DEFAULT_MIN_STAY.get(r["seasonCode"], 3)
-        gf_gap = gf_gaps.get(r["date"])
-        if gf_gap and config.GROUND_FLOOR_LOS["enabled"]:
-            gf_cfg = config.GROUND_FLOOR_LOS
-            es_protegida = r["seasonCode"] in gf_cfg["temporadas_protegidas"]
-            reducir = True
-            if es_protegida and (r.get("occNow", 0) < gf_cfg["upper_occ_threshold"]) and not r.get("eventName"):
-                reducir = False
-            if reducir:
-                ground_ms = max(gf_cfg["absolute_min"], gf_gap["minStayGap"])
-
-        entry_ground = {"from": r["date"], "to": r["date"], "minStay": ground_ms}
-        entry_ground.update(ground_slots)
-        calendar_updates[config.ROOM_GROUND].append(entry_ground)
-
-    # Send to Beds24 in batches
-    for room_id, updates in calendar_updates.items():
-        for start in range(0, len(updates), 30):
-            batch = updates[start:start + 30]
+        entry = build_calendar_entry(r)
+        calendar_upper.append(entry)
+        
+        # Ground floor: same prices, but minStay may differ
+        ground_entry = entry.copy()
+        ground_los = config.GROUND_FLOOR_LOS
+        if ground_los and ground_los.get("enabled"):
+            # Ground floor can have lower minStay in some seasons
+            sc = r.get("seasonCode", "M")
+            if sc not in ground_los.get("temporadas_protegidas", []):
+                occ = r.get("occNow", 0)
+                if occ > ground_los.get("upper_occ_threshold", 0.75):
+                    ground_entry["minStay"] = max(
+                        ground_los.get("absolute_min", 2),
+                        entry["minStay"] - 1
+                    )
+        calendar_ground.append(ground_entry)
+    
+    # Apply in batches of 60 days (Beds24 API limit)
+    batch_size = 60
+    errors = []
+    
+    for room_id, calendar, room_name in [
+        (config.ROOM_UPPER, calendar_upper, "Upper"),
+        (config.ROOM_GROUND, calendar_ground, "Ground"),
+    ]:
+        for i in range(0, len(calendar), batch_size):
+            batch = calendar[i:i + batch_size]
+            
             try:
-                api_post("inventory/rooms/calendar", [{"roomId": room_id, "calendar": batch}])
-                log.info(f"  Room {room_id}: {batch[0]['from']} → {batch[-1]['from']} ({len(batch)} días)")
+                endpoint = f"properties/{config.PROPERTY_ID}/rooms/{room_id}/offer1/calendar"
+                response = api_post(endpoint, batch)
+                
+                if response is None:
+                    errors.append(f"{room_name} batch {i//batch_size + 1}: API error")
             except Exception as e:
-                log.error(f"  ❌ Room {room_id}: {str(e)[:100]}")
-            time.sleep(0.5)
+                errors.append(f"{room_name} batch {i//batch_size + 1}: {e}")
+    
+    if errors:
+        log.warning(f"  ⚠️ Errores aplicando: {'; '.join(errors)}")
+        return {"applied": True, "errors": errors}
+    
+    log.info(f"  ✅ Precios aplicados: {len(results)} fechas × 2 rooms × 5 slots")
+    return {"applied": True, "errors": []}
