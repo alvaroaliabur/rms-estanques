@@ -313,6 +313,13 @@ def revenue_endpoint():
         return jsonify(tracker)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route("/email")
+def email_view():
+    from rms.email_report import get_last_email
+    email = get_last_email()
+    if not email or not email.get("html"):
+        return "<h1>No email generated yet. Hit /run first.</h1>", 404
+    return email["html"]
 
 
 # ══════════════════════════════════════════
