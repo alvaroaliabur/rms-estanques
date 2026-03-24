@@ -334,20 +334,24 @@ def email_view():
     return email["html"]
 
 @app.route("/market/test")
+@app.route("/market/test")
 def market_test():
     import requests as req
     key = os.getenv("AIRROI_API_KEY", "")
-    headers = {"X-API-KEY": key}
+    headers = {"X-API-KEY": key, "Content-Type": "application/json"}
     results = {}
-    # Test 1: Search by name
-    r1 = req.get("https://api.airroi.com/markets/search?query=Mallorca", headers=headers, timeout=15)
-    results["mallorca"] = r1.json() if r1.status_code == 200 else r1.text
-    # Test 2: Search by coordinates
-    r2 = req.get("https://api.airroi.com/markets/lookup?latitude=39.3167&longitude=2.9889", headers=headers, timeout=15)
-    results["coords"] = r2.json() if r2.status_code == 200 else r2.text
-    # Test 3: Search Ses Salines (municipality)
-    r3 = req.get("https://api.airroi.com/markets/search?query=Ses%20Salines", headers=headers, timeout=15)
-    results["ses_salines"] = r3.json() if r3.status_code == 200 else r3.text
+    # Test 1: Market metrics at locality level (ses Salines)
+    r1 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines"}, "num_months": 6}, timeout=15)
+    results["occ_locality"] = r1.json() if r1.status_code == 200 else {"status": r1.status_code, "text": r1.text[:300]}
+    # Test 2: Market metrics at district level
+    r2 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines", "district": "Colònia de Sant Jordi"}, "num_months": 6}, timeout=15)
+    results["occ_district"] = r2.json() if r2.status_code == 200 else {"status": r2.status_code, "text": r2.text[:300]}
+    # Test 3: Comp set by radius
+    r3 = req.post("https://api.airroi.com/listings/search/radius", headers=headers, json={"latitude": 39.3167, "longitude": 2.9889, "radius_miles": 2, "pagination": {"page_size": 5, "offset": 0}, "currency": "native"}, timeout=15)
+    results["compset"] = r3.json() if r3.status_code == 200 else {"status": r3.status_code, "text": r3.text[:300]}
+    # Test 4: Coordinates lookup
+    r4 = req.get("https://api.airroi.com/markets/lookup?lat=39.3167&lng=2.9889", headers=headers, timeout=15)
+    results["coords"] = r4.json() if r4.status_code == 200 else {"status": r4.status_code, "text": r4.text[:300]}
     return jsonify(results)
 
 # ══════════════════════════════════════════
