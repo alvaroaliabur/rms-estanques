@@ -104,7 +104,18 @@ def run_full():
             log.info(f"  ✅ Vacaciones actualizadas ({len(vac_updated)} días con boost)")
         else:
             log.info("  Cache de vacaciones vigente")
-        
+        # Step 4b: Market Intelligence (AirROI)
+        log.info("\n── STEP 4b: Market Intelligence ──")
+        try:
+            from rms.market_intelligence import check_and_update_market
+            market = check_and_update_market()
+            if market:
+                log.info(f"  ✅ Market intelligence: {len(market)} datasets")
+            else:
+                log.info("  Usando datos de mercado existentes")
+        except Exception as e:
+            log.warning(f"  Market intelligence error: {e}")
+            
         # Step 5: Load data
         log.info("\n── STEP 5: Cargar datos ──")
         otb = read_otb()
