@@ -92,7 +92,7 @@ def get_market_occupancy():
         "num_months": 24,
     })
     if data:
-        log.info(f"  📊 Market occupancy: {len(data.get('data', []))} months")
+        log.info(f"  📊 Market occupancy: {len(data.get('results', []))} months")
     return data
 
 
@@ -103,7 +103,7 @@ def get_market_adr():
         "num_months": 24,
     })
     if data:
-        log.info(f"  📊 Market ADR: {len(data.get('data', []))} months")
+        log.info(f"  📊 Market ADR: {len(data.get('results', []))} months")
     return data
 
 
@@ -161,7 +161,7 @@ def get_comp_set():
     })
     
     if data and data.get("results"):
-        listings = data["data"]
+        listings = data["results"]
         log.info(f"  📊 Comp set: {len(listings)} propiedades encontradas")
         
         # Extract key metrics
@@ -244,16 +244,14 @@ def actualizar_market_intelligence():
     # 2. Occupancy by month
     occ = get_market_occupancy()
     if occ and occ.get("results"):
-        intelligence["occupancy"] = occ["data"]
-        # Update config with fresh market occupancy
-        _update_market_occ(occ["data"])
+        intelligence["occupancy"] = occ["results"]
+        _update_market_occ(occ["results"])
     
     # 3. ADR by month
     adr = get_market_adr()
     if adr and adr.get("results"):
-        intelligence["adr"] = adr["data"]
-        # Update ADR_PEER with real market data
-        _update_market_adr(adr["data"])
+        intelligence["adr"] = adr["results"]
+        _update_market_adr(adr["results"])
     
     # 4. Forward pacing
     pacing = get_market_pacing()
