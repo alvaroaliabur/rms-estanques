@@ -2,6 +2,11 @@
 # COMP SET — RMS Estanques v7.2.2
 # ============================================================
 #
+# v7.2.2 CHANGES:
+#   - Added check_and_update_comp_set() with weekly freshness logic
+#   - Fixed: main.py was importing this function but it didn't exist
+#   - Comp set data cached in _comp_set_cache module-level dict
+#
 # DOS NIVELES DE COMP SET:
 #
 # TIER 1 — PRICING PEERS (ajustan precio dinámico)
@@ -15,15 +20,15 @@
 #
 # Fuente: BDC "Alojamientos comparables" actualizado 10-mar-2026.
 # Basado en clics, vistas y reservas reales de viajeros.
-#
-# v7.2.2: Añadido check_and_update_comp_set() requerido por main.py
 # ============================================================
 
 import logging
-import os
 import time
+import os
+import json
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 
 logger = logging.getLogger("rms.compset")
 
@@ -206,15 +211,119 @@ SELF_NAMES = [
 
 APIFY_CONFIG = {
     "actor_id": "voyager~booking-scraper",
-    "max_wait_seconds": 180,  # Búsqueda genérica tarda ~2min
+    "max_wait_seconds": 180,  # Subido de 120 a 180 para ventanas lejanas
     "poll_interval_seconds": 5,
-    "scrape_windows_days": [14, 30, 60],  # 3 ventanas: suficiente para comp set
+    "scrape_windows_days": [7, 14, 30, 60, 90],
     "profiles": {
         "default": {"nights": 3, "adults": 2},
         "summer":  {"nights": 7, "adults": 4},
     },
     "summer_months": [6, 7, 8, 9],
 }
+
+# ════════════════════════════════════════════════════════════
+# CACHE — Comp Set data persisted to disk between runs
+# ════════════════════════════════════════════════════════════
+
+_CACHE_DIR = Path("/tmp/rms_cache")
+_CACHE_FILE = _CACHE_DIR / "comp_set_cache.json"
+_FRESHNESS_DAYS = 7  # Re-scrape weekly
+_FRESHNESS_DAYS_SUMMER = 4  # More frequent in summer (jun-sep)
+
+_comp_set_cache = {}  # In-memory cache for current run
+
+
+def _load_cache():
+    """Load comp set cache from disk."""
+    global _comp_set_cache
+    try:
+        if _CACHE_FILE.exists():
+            with open(_CACHE_FILE, "r") as f:
+                _comp_set_cache = json.loads(f.read())
+                logger.info(f"  Comp set cache loaded ({len(_comp_set_cache.get('by_window', {}))} windows)")
+                return _comp_set_cache
+    except Exception as e:
+        logger.warning(f"  Cache load error: {e}")
+    _comp_set_cache = {}
+    return _comp_set_cache
+
+
+def _save_cache(data):
+    """Save comp set cache to disk."""
+    global _comp_set_cache
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_FILE, "w") as f:
+            f.write(json.dumps(data, default=str))
+        _comp_set_cache = data
+        logger.info(f"  Comp set cache saved")
+    except Exception as e:
+        logger.warning(f"  Cache save error: {e}")
+
+
+def _cache_is_fresh():
+    """Check if cached comp set data is still fresh."""
+    cache = _load_cache()
+    ts = cache.get("timestamp")
+    if not ts:
+        return False
+    try:
+        last_scrape = datetime.fromisoformat(ts)
+        age_hours = (datetime.now() - last_scrape).total_seconds() / 3600
+        now_month = datetime.now().month
+        max_age_days = _FRESHNESS_DAYS_SUMMER if now_month in APIFY_CONFIG["summer_months"] else _FRESHNESS_DAYS
+        is_fresh = age_hours < (max_age_days * 24)
+        logger.info(f"  Cache age: {age_hours:.1f}h (max: {max_age_days * 24}h) → {'FRESH' if is_fresh else 'STALE'}")
+        return is_fresh
+    except Exception as e:
+        logger.warning(f"  Cache freshness check error: {e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════════
+# PUBLIC API — called from main.py
+# ════════════════════════════════════════════════════════════
+
+def check_and_update_comp_set():
+    """
+    Weekly comp set update with freshness check.
+    Called from main.py Step 3.
+    
+    Returns:
+        dict with by_window data if scrape ran, None if cache is fresh.
+    """
+    from rms import config
+
+    apify_token = config.APIFY_TOKEN
+    if not apify_token:
+        logger.warning("  No APIFY_TOKEN — skipping comp set")
+        return None
+
+    if _cache_is_fresh():
+        logger.info("  Comp set cache is fresh — skipping scrape")
+        return None
+
+    logger.info("  Comp set stale — running Apify scrape...")
+    result = scrape_comp_set(apify_token)
+
+    if result and result.get("by_window"):
+        _save_cache(result)
+        n_windows = len(result["by_window"])
+        logger.info(f"  ✅ Comp set updated: {n_windows} windows scraped")
+        return result
+    else:
+        logger.warning("  Scrape returned no data")
+        return None
+
+
+def get_cached_comp_set():
+    """
+    Get cached comp set data (for pricing engine).
+    Returns cached data or empty dict.
+    """
+    if _comp_set_cache:
+        return _comp_set_cache
+    return _load_cache()
 
 
 def get_all_peer_urls():
@@ -266,13 +375,15 @@ def is_pricing_peer(name):
 
 def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
     """
-    Ejecuta scrape en Apify con búsqueda por destino + post-filtrado.
-    Usamos 'search' porque startUrls tarda 6+ min (demasiado lento).
-    Post-filtramos por is_pricing_peer para quedarnos solo con los peers.
+    Ejecuta scrape en Apify. Por defecto scrapea SOLO pricing peers.
+    Para market reference, pasar urls=get_all_urls().
     """
     if not apify_token:
         logger.warning("No Apify token")
         return []
+
+    if urls is None:
+        urls = get_all_peer_urls()
 
     cfg = APIFY_CONFIG
     input_data = {
@@ -283,7 +394,8 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
-        "maxItems": 30,  # Suficiente para capturar los 6 peers
+        "propertyUrls": urls,
+        "maxResults": len(urls) + 5,
     }
 
     try:
@@ -414,16 +526,19 @@ def scrape_comp_set(apify_token, windows_config=None):
 
         logger.info(f"  Scraping +{days_out}d ({ci_str}, {profile['nights']}n, {profile['adults']}a)...")
 
-        # Scrape por búsqueda genérica de zona, post-filtrado a pricing peers
-        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"])
+        # Scrape con TODAS las URLs (peers + market ref)
+        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"], get_all_urls())
 
         if results:
             # ADR de pricing peers (para ajuste de precio)
             adr_peers = calculate_comp_set_adr(results, peers_only=True)
+            # ADR de todo el market (para referencia)
+            adr_market = calculate_comp_set_adr(results, peers_only=False)
 
             n_peers = len([r for r in results if r["is_pricing_peer"] and r["price_per_night"] > 0])
+            n_total = len([r for r in results if r["price_per_night"] > 0])
 
-            logger.info(f"    +{days_out}d: ADR peers = {adr_peers}€ ({n_peers} peers)")
+            logger.info(f"    +{days_out}d: ADR peers = {adr_peers}€ ({n_peers} peers) | ADR market = {adr_market}€ ({n_total} props)")
 
             # Log detalle
             for r in sorted(results, key=lambda x: -x["price_per_night"]):
@@ -451,74 +566,3 @@ def scrape_comp_set(apify_token, windows_config=None):
         "market_results": market_results,
         "timestamp": datetime.now().isoformat(),
     }
-
-
-# ════════════════════════════════════════════════════════════
-# ORQUESTADOR — check_and_update_comp_set
-# Llamado por main.py Step 3. Decide si toca scrapear.
-# ════════════════════════════════════════════════════════════
-
-# Estado interno: timestamp del último scrape exitoso
-_last_scrape_ts = None
-
-
-def check_and_update_comp_set():
-    """
-    Comprueba si el comp set necesita actualizarse (scrape periódico).
-    - Si el último scrape fue hace < APIFY_MAX_AGE_DAYS → None (sin cambios)
-    - Si toca → ejecuta scrape_comp_set() y actualiza config.COMP_SET["ADR_PEER"]
-    - Retorna dict con resultados por ventana si se actualizó, None si no.
-    """
-    global _last_scrape_ts
-
-    from rms import config
-
-    apify_token = os.getenv("APIFY_TOKEN", "")
-    if not apify_token:
-        logger.warning("  No Apify token — saltando comp set update")
-        return None
-
-    max_age_days = config.COMP_SET.get("APIFY_MAX_AGE_DAYS", 14)
-
-    # Check if we need to scrape
-    if _last_scrape_ts:
-        age = (datetime.now() - _last_scrape_ts).total_seconds() / 86400
-        if age < max_age_days:
-            logger.info(f"  Comp set fresh ({age:.1f}d < {max_age_days}d) — skip")
-            return None
-
-    logger.info("  Ejecutando scrape de comp set...")
-
-    try:
-        data = scrape_comp_set(apify_token)
-    except Exception as e:
-        logger.error(f"  Scrape error: {e}")
-        return None
-
-    if not data or not data.get("by_window"):
-        logger.warning("  Scrape sin resultados")
-        return None
-
-    # Actualizar ADR_PEER en config con datos frescos de pricing peers
-    updated_months = {}
-    for days_out, window in data["by_window"].items():
-        if window.get("adr_peers") and window["adr_peers"] > 0:
-            ci = datetime.strptime(window["check_in"], "%Y-%m-%d")
-            month = ci.month
-            old_adr = config.COMP_SET["ADR_PEER"].get(month, 0)
-            new_adr = window["adr_peers"]
-
-            # Solo actualizar si hay cambio significativo (>5€)
-            if abs(new_adr - old_adr) > 5:
-                config.COMP_SET["ADR_PEER"][month] = new_adr
-                updated_months[month] = {"old": old_adr, "new": new_adr, "days_out": days_out}
-                logger.info(f"    ADR_PEER mes {month}: {old_adr}€ → {new_adr}€ (ventana +{days_out}d)")
-
-    _last_scrape_ts = datetime.now()
-
-    if updated_months:
-        logger.info(f"  ✅ ADR_PEER actualizado: {len(updated_months)} meses")
-    else:
-        logger.info("  ADR_PEER sin cambios significativos")
-
-    return data["by_window"]
