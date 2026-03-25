@@ -1,22 +1,15 @@
 """
-Explicación Abuelita — v7.2
-Generates human-readable explanation of how each price is formed.
+Explicación Abuelita — v7.2.1
+Clear narrative flow: each price explained step by step.
 
-Endpoint: GET /explicacion
-  - Returns HTML page with all 365 days explained
-  - Optional ?month=7 to filter by month
-  - Optional ?date=2026-07-15 for a single date
-
-Each date gets a paragraph explaining:
-  1. Season and base context
-  2. Availability and Capa A price
-  3. Forecast adjustments (pace, pickup, events, vacaciones, market)
-  4. Unconstrained demand uplift
-  5. Comp set adjustment
-  6. Genius compensation
-  7. Floor/ceiling/clamp
-  8. LOS and gaps
-  9. Final price
+Flow for each date:
+  1. Context (season, days out, availability)
+  2. Starting price (Capa A)
+  3. Adjustments UP or DOWN
+  4. Genius compensation
+  5. Guardrails (floor, ceiling, protection, min revenue, smoothing)
+  6. Final price with reason
+  7. MinStay
 """
 
 import logging
@@ -46,7 +39,6 @@ DAY_NAMES = {
 
 
 def explicar_fecha(r):
-    """Generate human-readable explanation for a single date result."""
     from rms.utils import parse_date
 
     d = parse_date(r["date"])
@@ -100,139 +92,147 @@ def explicar_fecha(r):
 
     # ── 1. Context ──
     libres_txt = "libre" if disp == 1 else "libres"
-    lines.append(f"<p><strong>Temporada:</strong> {season_name}. "
-                 f"Faltan <strong>{days_out} días</strong>. "
-                 f"Hay <strong>{reservadas} de 9</strong> apartamentos reservados, "
-                 f"queda{'n' if disp != 1 else ''} <strong>{disp}</strong> {libres_txt}.</p>")
+    if disp == 0:
+        lines.append(f"<p><strong>Temporada:</strong> {season_name}. "
+                     f"Faltan <strong>{days_out} días</strong>. "
+                     f"<strong>LLENO</strong> — los 9 apartamentos están reservados.</p>")
+    else:
+        lines.append(f"<p><strong>Temporada:</strong> {season_name}. "
+                     f"Faltan <strong>{days_out} días</strong>. "
+                     f"Hay <strong>{reservadas} de 9</strong> reservados, "
+                     f"queda{'n' if disp != 1 else ''} <strong>{disp}</strong> {libres_txt}.</p>")
 
-    # ── 2. Capa A base price ──
+    # ── 2. Starting price (Capa A) ──
     seg = r.get("segment", "")
     seg_info = config.SEGMENT_BASE.get(seg, {})
     ppd = seg_info.get("preciosPorDisp", {})
-    precio_capa_a = ppd.get(disp, {})
+    disp_for_lookup = max(1, disp)
+    precio_capa_a = ppd.get(disp_for_lookup)
     if isinstance(precio_capa_a, dict):
         precio_capa_a = precio_capa_a.get("precio", "?")
 
-    lines.append(f"<p><strong>Precio base (Capa A):</strong> Con {disp} libres en segmento {seg}, "
-                 f"la curva de demanda histórica dice <strong>{precio_capa_a}€/noche</strong>.</p>")
+    if disp == 0:
+        lines.append(f"<p><strong>① Precio de partida:</strong> Lleno → se usa precio de máxima ocupación "
+                     f"(1 libre): <strong>{precio_capa_a}€</strong> ({seg}).</p>")
+    else:
+        lines.append(f"<p><strong>① Precio de partida:</strong> Con {disp} {libres_txt} en {seg}, "
+                     f"la curva histórica dice <strong>{precio_capa_a}€</strong>.</p>")
 
-    # ── 3. Forecast adjustments ──
-    adjustments = []
-    if forecast_dem > 0:
-        adjustments.append(f"Se esperan <strong>{forecast_dem}</strong> reservas más → "
-                          f"disponibilidad virtual baja a <strong>{disp_virtual}</strong>")
+    # ── 3. Adjustments ──
+    adj_lines = []
+
+    if forecast_dem > 0 and disp > 0:
+        adj_lines.append(f"Se esperan ~{forecast_dem:.0f} reservas más → disponibilidad efectiva baja a {disp_virtual}")
 
     if pace_ratio != 1.0:
         direction = "por encima" if pace_ratio > 1.0 else "por debajo"
         pct = abs(round((pace_ratio - 1.0) * 100))
-        adjustments.append(f"Pace vs año pasado: <strong>{pct}% {direction}</strong> → "
-                          f"factor {pace_ratio:.2f}")
+        adj_lines.append(f"Pace vs año pasado: {pct}% {direction}")
 
     if vac_factor > 1.0:
         pct_vac = round((vac_factor - 1.0) * 100)
-        adjustments.append(f"Vacaciones escolares (DE/NL/UK): <strong>+{pct_vac}%</strong> demanda")
+        adj_lines.append(f"Vacaciones escolares (DE/NL/UK): +{pct_vac}%")
 
     if market_factor != 1.0:
         if market_factor > 1.0:
-            adjustments.append(f"Mercado más caliente que nosotros: <strong>+{round((market_factor-1)*100)}%</strong>")
+            adj_lines.append(f"Mercado más caliente: +{round((market_factor-1)*100)}%")
         else:
-            adjustments.append(f"Mercado más frío que nosotros: <strong>{round((market_factor-1)*100)}%</strong>")
+            adj_lines.append(f"Mercado más frío: {round((market_factor-1)*100)}%")
 
     if event_name:
         pct_ev = round((event_factor - 1.0) * 100)
-        adjustments.append(f"Evento: <strong>{event_name}</strong> → +{pct_ev}%")
+        adj_lines.append(f"Evento: {event_name} → +{pct_ev}%")
 
-    if adjustments:
-        lines.append("<p><strong>Ajustes de demanda:</strong></p><ul>")
-        for a in adjustments:
+    # Unconstrained demand — ONLY when disp > 0 (real availability)
+    if unc_uplift > 1.0 and disp > 0:
+        pct_unc = round((unc_uplift - 1.0) * 100)
+        from rms.pricing import SEGMENT_OCC_HIST
+        occ_hist = SEGMENT_OCC_HIST.get(seg, 0)
+        adj_lines.append(f"Demanda no restringida (occ hist {occ_hist}%, {disp} {libres_txt}): +{pct_unc}%")
+
+    if adj_lines:
+        lines.append("<p><strong>② Ajustes:</strong></p><ul>")
+        for a in adj_lines:
             lines.append(f"<li>{a}</li>")
         lines.append("</ul>")
     else:
-        lines.append("<p><strong>Ajustes de demanda:</strong> Ninguno significativo.</p>")
+        lines.append("<p><strong>② Ajustes:</strong> Ninguno.</p>")
 
-    # ── 4. Unconstrained demand ──
-    if unc_uplift > 1.0:
-        pct_unc = round((unc_uplift - 1.0) * 100)
-        occ_hist = None
-        from rms.pricing import SEGMENT_OCC_HIST
-        occ_hist = SEGMENT_OCC_HIST.get(seg, 0)
-        lines.append(f"<p><strong>Demanda no restringida:</strong> Este segmento tuvo "
-                     f"<strong>{occ_hist}%</strong> de ocupación histórica. Con solo {disp} libres, "
-                     f"hay demanda invisible → precio sube <strong>+{pct_unc}%</strong>.</p>")
+    # ── 4. Price buildup ──
+    genius_price = round(precio_neto * config.GENIUS_COMPENSATION)
+    lines.append(f"<p><strong>③ Precio calculado:</strong> "
+                 f"Neto {precio_neto}€ × Genius {config.GENIUS_COMPENSATION} = <strong>{genius_price}€</strong></p>")
 
-    # ── 5. Comp set ──
-    if ajuste_cs != 1.0:
-        comp_adr = config.COMP_SET["ADR_PEER"].get(month, 0)
-        lines.append(f"<p><strong>Comp set:</strong> La competencia cobra ~{comp_adr}€ de media en {month_name}. "
-                     f"Nuestro precio estaba por encima → ajuste <strong>{ajuste_cs:.2f}</strong>.</p>")
+    # ── 5. Guardrails ──
+    guardrail_lines = []
 
-    # ── 6. Genius + floor/ceiling ──
-    lines.append(f"<p><strong>Precio neto:</strong> {precio_neto}€. "
-                 f"Con compensación Genius (×{config.GENIUS_COMPENSATION}): "
-                 f"<strong>{round(precio_neto * config.GENIUS_COMPENSATION)}€</strong>.</p>")
-
-    lines.append(f"<p><strong>Suelo:</strong> {suelo}€ | <strong>Techo:</strong> {techo}€")
     if clamped == "SUELO":
-        lines.append(f" → <span class='warn'>Precio limitado por SUELO (el cálculo daba menos de {suelo}€)</span>")
+        guardrail_lines.append(f"⬆️ Cálculo daba {genius_price}€ → <strong>suelo {suelo}€</strong> aplicado")
     elif clamped == "TECHO":
-        lines.append(f" → <span class='warn'>Precio limitado por TECHO (el cálculo daba más de {techo}€)</span>")
-    elif clamped == "PROT":
-        lines.append(f" → <span class='warn'>Protección de precio: ya se vendieron noches a {media_vendida}€ de media</span>")
-    lines.append("</p>")
+        guardrail_lines.append(f"⬇️ Cálculo daba {genius_price}€ → <strong>techo {techo}€</strong> aplicado")
 
-    # ── 7. Price protection ──
-    if media_vendida > 0:
-        lines.append(f"<p><strong>Protección:</strong> Ya hay reservas a {media_vendida}€/noche de media. "
-                     f"Nivel de protección: {round(prot_level*100)}% (no bajar de {round(media_vendida * prot_level)}€).</p>")
+    if media_vendida > 0 and prot_level > 0:
+        min_prot = round(media_vendida * prot_level)
+        guardrail_lines.append(f"🛡️ Protección: reservas existentes a {media_vendida}€ → no bajar de {min_prot}€")
 
-    # ── 8. Last minute ──
-    if last_minute:
-        lines.append(f"<p><strong>Last minute:</strong> Modo <strong>{last_minute}</strong> activo "
-                     f"(temporada baja, cerca de la fecha, mucha disponibilidad).</p>")
-
-    # ── 9. Min booking revenue ──
     if min_rev_applied:
         min_rev = config.MIN_BOOKING_REVENUE.get(sc, 0)
-        lines.append(f"<p><strong>Revenue mínimo por reserva:</strong> En temporada {sc}, una reserva debe generar "
-                     f"al menos {min_rev}€. Con minStay {min_stay}, eso son {min_rev_per_night}€/noche mínimo.</p>")
+        guardrail_lines.append(f"💰 Revenue mínimo: {min_rev}€ ÷ {min_stay}n = {min_rev_per_night}€/noche")
 
-    # ── 10. LOS / MinStay ──
-    lines.append(f"<p><strong>Estancia mínima:</strong>")
-    if min_stay == min_stay_ground:
-        lines.append(f" <strong>{min_stay} noches</strong> (ambas plantas).")
-    else:
-        lines.append(f" Upper: <strong>{min_stay} noches</strong> | Ground: <strong>{min_stay_ground} noches</strong>.")
-
-    if los_reduccion > 0:
-        lines.append(f" Reducida {los_reduccion} noches ({los_razon})")
-        if los_premium > 1.0:
-            lines.append(f" con premium de +{round((los_premium-1)*100)}% por estancia más corta.")
-
-    if gap_override:
-        lines.append(f" <span class='gap'>Gap detectado: minStay ajustada para llenar hueco.</span>")
-    if gap_override_ground:
-        lines.append(f" <span class='gap'>Gap en planta baja: minStay ground ajustada independientemente.</span>")
-
-    lines.append("</p>")
-
-    # ── 11. Smoothing ──
     if suavizado:
-        if suavizado == "BAJADO":
-            lines.append(f"<p><strong>Suavizado:</strong> Precio reducido para no subir >12% respecto al día anterior.</p>")
-        elif suavizado == "SUBIDO":
-            lines.append(f"<p><strong>Suavizado:</strong> Precio subido para no bajar >12% respecto al día anterior.</p>")
-        elif suavizado == "MONO_UP":
-            lines.append(f"<p><strong>Monotonía:</strong> Más ocupación que ayer → precio igualado al alza.</p>")
-        elif suavizado == "MONO_DN":
-            lines.append(f"<p><strong>Monotonía:</strong> Menos ocupación que ayer → precio igualado a la baja.</p>")
+        smooth_txt = {
+            "BAJADO": "📉 Suavizado: -12% máx vs ayer",
+            "SUBIDO": "📈 Suavizado: +12% máx vs ayer",
+            "MONO_UP": "📈 Más ocupado que ayer → precio igualado al alza",
+            "MONO_DN": "📉 Menos ocupado que ayer → precio igualado a la baja",
+        }
+        guardrail_lines.append(smooth_txt.get(suavizado, suavizado))
+
+    if last_minute:
+        guardrail_lines.append(f"⏰ {last_minute}: temp baja + fecha cercana + alta disponibilidad")
+
+    if guardrail_lines:
+        lines.append("<p><strong>④ Guardarraíles:</strong></p><ul>")
+        for g in guardrail_lines:
+            lines.append(f"<li>{g}</li>")
+        lines.append("</ul>")
+
+    # ── 6. Final ──
+    reason = ""
+    if clamped == "SUELO":
+        reason = f"limitado por suelo {suelo}€"
+    elif clamped == "TECHO":
+        reason = f"limitado por techo {techo}€"
+    elif clamped == "PROT":
+        reason = "protegido por reservas existentes"
+    elif min_rev_applied:
+        reason = "mínimo por revenue de reserva"
+    elif suavizado:
+        reason = "ajustado por suavizado"
+    else:
+        reason = "precio libre"
+
+    lines.append(f"<p class='final-line'><strong>→ {precio_final}€</strong> ({reason}) | Genius: {precio_genius}€</p>")
+
+    # ── 7. MinStay ──
+    if min_stay == min_stay_ground:
+        ms_txt = f"{min_stay} noches (ambas plantas)"
+    else:
+        ms_txt = f"Upper: {min_stay}n | Ground: {min_stay_ground}n"
+
+    extra = ""
+    if gap_override:
+        extra += " — <span class='gap'>gap detectado</span>"
+    if gap_override_ground:
+        extra += " — <span class='gap'>gap planta baja</span>"
+
+    lines.append(f"<p><strong>MinStay:</strong> {ms_txt}{extra}</p>")
 
     lines.append("</div>")
     return "\n".join(lines)
 
 
 def generar_explicacion_html(results, month_filter=None, date_filter=None):
-    """Generate full HTML page with explanations."""
-    
     html = """<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -252,6 +252,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
   .fecha li { margin: 3px 0; font-size: 0.95em; }
   .warn { color: #e67e22; font-weight: bold; }
   .gap { color: #8e44ad; font-weight: bold; }
+  .final-line { background: #f0f4f8; padding: 8px 12px; border-radius: 4px; font-size: 1.05em; }
   .nav { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
   .nav a { margin: 0 8px; color: #0f3460; text-decoration: none; font-weight: bold; }
   .nav a:hover { text-decoration: underline; }
@@ -261,49 +262,41 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 </style>
 </head>
 <body>
-<h1>🏨 RMS Estanques v7.2 — Explicación de Precios</h1>
+<h1>RMS Estanques v7.2 — Explicación de Precios</h1>
 """
 
-    # Navigation
-    html += "<div class='nav'>Filtrar por mes: "
+    html += "<div class='nav'>Mes: "
     html += "<a href='/explicacion'>Todos</a> "
     for m in range(1, 13):
         active = " class='active'" if month_filter == m else ""
         html += f"<a href='/explicacion?month={m}'{active}>{MONTH_NAMES[m][:3].capitalize()}</a> "
     html += "</div>"
 
-    # Filter results
     filtered = results
     if date_filter:
         filtered = [r for r in results if r["date"] == date_filter]
     elif month_filter:
         filtered = [r for r in results if int(r["date"][5:7]) == month_filter]
 
-    # Stats
     if filtered:
         avg_price = round(sum(r["precioFinal"] for r in filtered) / len(filtered))
         min_price = min(r["precioFinal"] for r in filtered)
         max_price = max(r["precioFinal"] for r in filtered)
         avg_disp = round(sum(r["disponibles"] for r in filtered) / len(filtered), 1)
         suelo_count = sum(1 for r in filtered if r.get("clampedBy") == "SUELO")
-        techo_count = sum(1 for r in filtered if r.get("clampedBy") == "TECHO")
         vac_count = sum(1 for r in filtered if r.get("vacFactor", 1.0) > 1.0)
 
         html += "<div class='stats'>"
-        html += f"<span>📊 {len(filtered)} días</span>"
-        html += f"<span>💰 Media: {avg_price}€</span>"
-        html += f"<span>⬇️ Mín: {min_price}€</span>"
-        html += f"<span>⬆️ Máx: {max_price}€</span>"
-        html += f"<span>🏠 Disp media: {avg_disp}</span>"
+        html += f"<span>{len(filtered)} días</span>"
+        html += f"<span>Media: {avg_price}€</span>"
+        html += f"<span>Rango: {min_price}–{max_price}€</span>"
+        html += f"<span>Disp: {avg_disp}</span>"
         if suelo_count:
-            html += f"<span>🔻 Suelo: {suelo_count}d</span>"
-        if techo_count:
-            html += f"<span>🔺 Techo: {techo_count}d</span>"
+            html += f"<span>Suelo: {suelo_count}d</span>"
         if vac_count:
-            html += f"<span>🏫 Vac: {vac_count}d</span>"
+            html += f"<span>Vac: {vac_count}d</span>"
         html += "</div>"
 
-    # Generate explanations
     current_month = None
     for r in filtered:
         m = int(r["date"][5:7])
@@ -313,7 +306,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
         html += explicar_fecha(r)
 
     if not filtered:
-        html += "<p>No hay datos. Ejecuta <a href='/run'>/run</a> primero.</p>"
+        html += "<p>No hay datos. <a href='/run'>Ejecutar /run</a> primero.</p>"
 
     html += "</body></html>"
     return html
