@@ -2,10 +2,13 @@
 RMS Estanques — Configuration
 All pricing parameters, property details, and system settings.
 
-UPDATED: v7.2.1 — 25 marzo 2026
-- Techos calibrados con datos reales (max vendido 468€, no fantasía de 700€)
+UPDATED: v7.3 — 25 marzo 2026
+- 3 años de histórico para fill curves (velocidad de reserva, NO precios)
+- CURVE_WEIGHTS ponderados: 2025 pesa 50%, 2024 35%, 2023 15%
+- Revenue tracker compara vs MEJOR año histórico (no solo LY)
+- Techos calibrados con datos reales (max vendido 468€)
 - Floors subidos para proteger últimas unidades en verano
-- preciosPorDisp julio/agosto importados de GAS CAPA_A_OVERRIDE_UA (probados en producción)
+- preciosPorDisp julio/agosto importados de GAS CAPA_A_OVERRIDE_UA
 - Comp set reducido a 6 peers reales (<1.5km)
 - RECORDAR: precios en Beds24, Genius descuenta 15% al huésped
 """
@@ -35,11 +38,23 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SHEET_ID = os.getenv("SHEET_ID", "1aL5--wWdHiQV_G30YcbLKzt4stoPI_Ma24Me1QSTcEc")
 
 # ══════════════════════════════════════════
-# PRICING HORIZON
+# PRICING HORIZON + HISTORICAL DATA
+# v7.3: 3 años de histórico para fill curves robustas
+# Los PRECIOS de 2023 son irrelevantes, pero la VELOCIDAD
+# de reserva (cuántos reservados a X días vista) sí vale.
 # ══════════════════════════════════════════
 PRICING_HORIZON = 365
-HISTORICAL_YEARS = [datetime.now().year - 1]
-CURVE_WEIGHTS = {datetime.now().year - 1: 1.0}
+
+_current_year = datetime.now().year
+HISTORICAL_YEARS = [_current_year - 3, _current_year - 2, _current_year - 1]
+# 2026: [2023, 2024, 2025] | 2027: [2024, 2025, 2026] | etc.
+
+# Pesos: año más reciente pesa más
+CURVE_WEIGHTS = {
+    _current_year - 3: 0.15,   # 2023: poco peso (pricing era distinto)
+    _current_year - 2: 0.35,   # 2024: peso medio
+    _current_year - 1: 0.50,   # 2025: benchmark principal
+}
 
 # ══════════════════════════════════════════
 # SEASONS
@@ -54,7 +69,7 @@ SEASON_CODE = {
 # preciosPorDisp: {1: price_1_free, ..., 9: price_9_free}
 #
 # NOTA: Estos precios van a Beds24. El huésped Genius ve ~85% de esto.
-# Ejemplo: disp=1 agosto WD = 420€ en Beds24 → Genius paga 357€
+# Ejemplo: disp=1 agosto WD = 440€ en Beds24 → Genius paga 374€
 #
 # v7.2.1: julio y agosto recalibrados con datos de GAS CAPA_A_OVERRIDE_UA
 # que generaron el revenue real de 2025. Techos bajados a valores realistas.
@@ -84,15 +99,10 @@ SEGMENT_BASE = {
              "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 170, 6: 170, 7: 160, 8: 140, 9: 140}},
     "6-WE": {"code": "A",  "base": 170, "suelo": 128, "techo": 360,
              "preciosPorDisp": {1: 240, 2: 210, 3: 200, 4: 190, 5: 180, 6: 170, 7: 170, 8: 160, 9: 160}},
-    # ── JULIO v7.2.1: importado de GAS CAPA_A_OVERRIDE_UA ──
-    # disp=1 WD 400€ → Genius 340€ | disp=1 WE 420€ → Genius 357€
     "7-WD": {"code": "UA", "base": 260, "suelo": 168, "techo": 520,
              "preciosPorDisp": {1: 400, 2: 355, 3: 325, 4: 305, 5: 290, 6: 280, 7: 275, 8: 270, 9: 265}},
     "7-WE": {"code": "UA", "base": 260, "suelo": 168, "techo": 520,
              "preciosPorDisp": {1: 420, 2: 375, 3: 340, 4: 320, 5: 305, 6: 295, 7: 285, 8: 280, 9: 275}},
-    # ── AGOSTO v7.2.1: importado de GAS CAPA_A_OVERRIDE_UA ──
-    # disp=1 WD 440€ → Genius 374€ | disp=1 WE 460€ → Genius 391€
-    # Max real vendido ago 2025 = 468€ (Genius 398€)
     "8-WD": {"code": "UA", "base": 300, "suelo": 208, "techo": 540,
              "preciosPorDisp": {1: 440, 2: 395, 3: 360, 4: 335, 5: 320, 6: 310, 7: 300, 8: 295, 9: 290}},
     "8-WE": {"code": "UA", "base": 300, "suelo": 208, "techo": 540,
@@ -161,14 +171,11 @@ SEASONAL_FLOOR = {
     "B": 75, "MB": 90, "M": 140, "MA": 165, "A": 235, "UA": 395,
 }
 
-# v7.2.1: julio 320→390 (Genius 332€), agosto 367→440 (Genius 374€)
 MONTHLY_FLOOR = {
     1: 60, 2: 65, 3: 95, 4: 130, 5: 170, 6: 260,
     7: 390, 8: 440, 9: 280, 10: 175, 11: 70, 12: 85,
 }
 
-# v7.2.1: julio 650→520 (Genius 442€), agosto 700→540 (Genius 459€)
-# Max real vendido = 468€ en Beds24 (Genius 398€). Techo da ~15% margen.
 MONTHLY_CEILING = {
     1: 180, 2: 180, 3: 200, 4: 310, 5: 360, 6: 500,
     7: 520, 8: 540, 9: 500, 10: 380, 11: 180, 12: 250,
@@ -193,8 +200,6 @@ MIN_BOOKING_REVENUE = {
 
 # ══════════════════════════════════════════
 # GENIUS COMPENSATION
-# precio_publicado = precio_neto * 1.18
-# Para que tras -15% Genius, revenue ≈ precio_neto
 # ══════════════════════════════════════════
 GENIUS_COMPENSATION = 1.18
 
@@ -297,7 +302,6 @@ EVENTS_OVERLAP_RULE = "MAX"
 # V7 ENGINE CONFIG
 # ══════════════════════════════════════════
 V7 = {
-    # v7.2.1: julio 320→360, agosto 367→400 (coherente con MONTHLY_FLOOR)
     "MONTHLY_FLOOR_V7": {
         1: 78, 2: 89, 3: 94, 4: 134, 5: 154, 6: 218,
         7: 390, 8: 440, 9: 222, 10: 161, 11: 94, 12: 148,
@@ -364,7 +368,7 @@ ALERTAS_ANOMALIAS = {
 }
 
 # ══════════════════════════════════════════
-# APIFY — v7.2.1: reducido a 6 peers reales
+# APIFY — 6 peers reales
 # ══════════════════════════════════════════
 APIFY_CONFIG = {
     "ACTOR_ID": "voyager~booking-scraper",
@@ -428,3 +432,8 @@ DEMAND_CURVE = {
     "MIN_OBS_PER_RANGE": 20,
     "CEILING_MULTIPLIER": 1.50,
 }
+
+# ══════════════════════════════════════════
+# MARKET INTELLIGENCE (AirROI)
+# ══════════════════════════════════════════
+MARKET_OCC = {}
