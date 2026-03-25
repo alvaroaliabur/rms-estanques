@@ -387,7 +387,6 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
 
     cfg = APIFY_CONFIG
     input_data = {
-        "search": "Colònia de Sant Jordi",
         "checkIn": check_in,
         "checkOut": check_out,
         "adults": adults,
@@ -395,7 +394,6 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
         "currency": "EUR",
         "language": "es",
         "propertyUrls": urls,
-        "maxResults": len(urls) + 5,
     }
 
     try:
