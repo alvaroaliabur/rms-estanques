@@ -1,10 +1,12 @@
 """
-Apply Prices — v7.2
-CHANGES:
+Apply Prices — v7.2.2
+CHANGES from v7.2:
+  - v7.2.2: Ground floor pricing +10% premium over upper floor
+    Ground floor = acceso jardín, terraza privada, producto premium.
+    Applied at the price level, not as a multiplier on the final price.
   - Ground floor minStay fully independent from upper floor
   - Uses minStayGround from pricing results (gap-aware)
   - Modest duration discount for 14+ nights in UA (5% when days_out > 60)
-  - apply.py now reads minStayGround from results dict
 """
 
 import logging
@@ -12,6 +14,11 @@ from rms import config
 from rms.beds24 import api_post
 
 log = logging.getLogger(__name__)
+
+# ══════════════════════════════════════════
+# GROUND FLOOR PREMIUM
+# ══════════════════════════════════════════
+GROUND_FLOOR_PREMIUM = 1.10  # +10% sobre Upper Floor
 
 
 # ══════════════════════════════════════════
@@ -103,8 +110,10 @@ def calc_duration_price(base_price, slot_name, occ, suelo, days_out, season_code
 def build_calendar_entry(result, room_type="upper"):
     """
     Build a single Beds24 calendar entry with all price slots.
-    
-    room_type: "upper" or "ground" — determines minStay used.
+
+    room_type: "upper" or "ground"
+    - "ground" gets +10% premium on all prices (GROUND_FLOOR_PREMIUM)
+    - "ground" uses independent minStay (minStayGround from results)
     """
     d = result["date"]
     base = result["precioFinal"]
@@ -112,6 +121,12 @@ def build_calendar_entry(result, room_type="upper"):
     occ = result.get("occNow", 0)
     days_out = result.get("daysOut", 60)
     sc = result.get("seasonCode", "M")
+    techo = result.get("techo", 9999)
+
+    # Ground floor: +10% premium, clamped by ceiling
+    if room_type == "ground":
+        base = min(round(base * GROUND_FLOOR_PREMIUM), techo)
+        suelo = round(suelo * GROUND_FLOOR_PREMIUM)
 
     # Pick minStay based on room type
     if room_type == "ground":
@@ -142,7 +157,7 @@ def build_calendar_entry(result, room_type="upper"):
 def get_ground_floor_minstay(result):
     """
     Ground floor (1 unit) has independent minStay.
-    
+
     v7.2: Now uses minStayGround from results if available (set by
     gap detection). Falls back to reducing upper minStay by 1.
     """
@@ -189,7 +204,7 @@ def aplicar_precios(results):
         entry_upper = build_calendar_entry(r, room_type="upper")
         calendar_upper.append(entry_upper)
 
-        # Ground floor: 1 unit — independent minStay
+        # Ground floor: 1 unit — +10% premium + independent minStay
         entry_ground = build_calendar_entry(r, room_type="ground")
         # Override minStay if not already set by gap detection
         if not r.get("gapOverrideGround"):
@@ -220,8 +235,10 @@ def aplicar_precios(results):
 
     # Count ground floor dates with different minStay than upper
     diff_minstay = sum(1 for u, g in zip(calendar_upper, calendar_ground) if u["minStay"] != g["minStay"])
+    diff_price = sum(1 for u, g in zip(calendar_upper, calendar_ground) if u.get("price1", 0) != g.get("price1", 0))
     if diff_minstay > 0:
         log.info(f"  🏠 Ground floor: {diff_minstay} fechas con minStay diferente al upper")
+    log.info(f"  🏠 Ground floor: +10% premium aplicado en {diff_price} fechas")
 
     slot_count = sum(1 for r in results for s, o in get_open_slots(r.get("seasonCode", "M")).items() if o)
     log.info(f"  ✅ Precios aplicados: {len(results)} fechas × 2 rooms, {slot_count} slots activos")
