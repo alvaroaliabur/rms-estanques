@@ -58,7 +58,7 @@ def run_full():
 
     start = datetime.now()
     log.info("══════════════════════════════════════════")
-    log.info("  RMS ESTANQUES v7.3 — Full Pricing Run")
+    log.info("  RMS ESTANQUES v7.4 — Full Pricing Run")
     log.info(f"  {start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("══════════════════════════════════════════")
 
@@ -263,7 +263,7 @@ def health():
     next_run = str(scheduler_job.next_run_time) if scheduler_job else "not scheduled"
     return jsonify({
         "status": "ok",
-        "service": "RMS Estanques v7.3",
+        "service": "RMS Estanques v7.4",
         "next_run": next_run,
         "run_in_progress": _run_in_progress,
     })
