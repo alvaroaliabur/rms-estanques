@@ -1,6 +1,10 @@
 """
-LOS Dinámico + Gap Detection.
-Replaces: getMinStayDinamico_, detectGapsDinamico_
+LOS Dinámico + Gap Detection — v7.2
+CHANGES:
+  - Gap detection now works per room type (ground=1 unit, upper=8 units)
+  - Ground floor has independent minStay from upper floor
+  - detect_gaps_dinamico returns gaps keyed by date with per-type info
+  - Expanded gap horizon from 60 to 90 days
 """
 
 from datetime import date, timedelta
@@ -74,13 +78,208 @@ def get_min_stay_dinamico(fecha, occ_now, days_out, season_code, expected_occ, d
     }
 
 
-def detect_gaps_dinamico(otb):
-    """Detect gaps in OTB for dynamic minStay and premium."""
+# ══════════════════════════════════════════
+# GAP DETECTION v7.2 — Per Room Type
+# ══════════════════════════════════════════
+#
+# Two room types:
+#   - UPPER (roomId 269521): 8 units, shared pool of availability
+#   - GROUND (roomId 269520): 1 unit, independent availability
+#
+# For UPPER: we detect gaps in the aggregate OTB of 8 units.
+#   A "gap" exists when ALL 8 units are booked on surrounding dates
+#   but some units have a short window free. Since we don't have
+#   per-unit booking data from the aggregate OTB, we use a proxy:
+#   if disp_upper <= 2 on neighbors but disp_upper > 0 on the date,
+#   it's likely a gap in one specific unit.
+#
+# For GROUND: we detect gaps by looking at the ground floor's own
+#   bookings. Since it's 1 unit, any free stretch IS the gap.
+#
+# The OTB dict now needs to carry per-type availability.
+# We add a parallel function that reads per-room-type OTB.
+
+def detect_gaps_dinamico(otb, otb_by_type=None):
+    """
+    Detect gaps for dynamic minStay and premium.
+    
+    Args:
+        otb: Standard OTB dict {date_str: total_units_booked}
+        otb_by_type: Optional dict with per-type OTB:
+            {"upper": {date_str: units_booked}, "ground": {date_str: units_booked}}
+            If not provided, falls back to aggregate detection.
+    
+    Returns:
+        Dict keyed by date_str with gap info including per-type details.
+    """
     gaps = {}
     today = date.today()
+    horizon = 90  # Extended from 60
+
+    if otb_by_type:
+        # ═══ NEW: Per-type gap detection ═══
+        _detect_gaps_upper(gaps, otb_by_type.get("upper", {}), today, horizon)
+        _detect_gaps_ground(gaps, otb_by_type.get("ground", {}), today, horizon)
+    else:
+        # Fallback: aggregate detection (old behavior)
+        _detect_gaps_aggregate(gaps, otb, today, horizon)
+
+    return gaps
+
+
+def _detect_gaps_upper(gaps, otb_upper, today, horizon):
+    """
+    Detect gaps in upper floor (8 units).
+    
+    Strategy: Look for dates where 1-2 units are free but neighbors
+    are heavily booked. This indicates a gap in specific units.
+    """
+    UPPER_UNITS = 8
+    di = 0
+    while di < horizon:
+        d = today + timedelta(days=di)
+        date_str = fmt(d)
+        reservadas = otb_upper.get(date_str, 0)
+        disponibles = UPPER_UNITS - reservadas
+
+        if disponibles < 1:
+            di += 1
+            continue
+
+        # Count consecutive nights with availability
+        gap_length = 0
+        for gdi in range(10):  # Extended scan to 10
+            gd = today + timedelta(days=di + gdi)
+            gd_str = fmt(gd)
+            gd_disp = UPPER_UNITS - otb_upper.get(gd_str, 0)
+            if gd_disp >= 1:
+                gap_length += 1
+            else:
+                break
+
+        if gap_length < 2 or gap_length > 7:
+            di += max(1, gap_length)
+            continue
+
+        # Check if this is a real gap: are neighbors heavily booked?
+        # Look at day before and day after the gap
+        day_before = fmt(today + timedelta(days=max(0, di - 1)))
+        day_after = fmt(today + timedelta(days=di + gap_length))
+        disp_before = UPPER_UNITS - otb_upper.get(day_before, 0)
+        disp_after = UPPER_UNITS - otb_upper.get(day_after, 0)
+
+        # It's a meaningful gap if bookings are high around it
+        is_surrounded = disp_before <= 2 or disp_after <= 2
+
+        season_code = config.SEASON_CODE[d.month]
+        default_ms = config.DEFAULT_MIN_STAY.get(season_code, 3)
+
+        if gap_length < default_ms:
+            # Gap shorter than minStay — MUST reduce or it's unsellable
+            min_stay_gap = gap_length
+            premium_gap = 1.20 if gap_length <= 2 else 1.12
+        elif is_surrounded and gap_length <= default_ms + 1:
+            # Gap barely fits minStay with tight neighbors
+            min_stay_gap = gap_length
+            premium_gap = 1.10
+        elif season_code == "UA":
+            min_stay_gap = gap_length
+            premium_gap = 1.08
+        else:
+            min_stay_gap = default_ms
+            premium_gap = 1.08 if di < 14 else 1.05
+
+        gaps[date_str] = {
+            "gapLength": gap_length,
+            "daysOut": di,
+            "disponibles": disponibles,
+            "minStayGap": min_stay_gap,
+            "premiumGap": premium_gap,
+            "roomType": "upper",
+            "surrounded": is_surrounded,
+        }
+
+        di += gap_length
+
+
+def _detect_gaps_ground(gaps, otb_ground, today, horizon):
+    """
+    Detect gaps in ground floor (1 unit).
+    
+    Since it's 1 unit, any free stretch is the actual gap.
+    Ground floor has independent minStay (can be lower than upper).
+    """
+    GROUND_UNITS = 1
+    gf_cfg = config.GROUND_FLOOR_LOS or {}
+    gf_absolute_min = gf_cfg.get("absolute_min", 2)
 
     di = 0
-    while di < 60:
+    while di < horizon:
+        d = today + timedelta(days=di)
+        date_str = fmt(d)
+        reservadas = otb_ground.get(date_str, 0)
+        disponibles = GROUND_UNITS - reservadas
+
+        if disponibles < 1:
+            di += 1
+            continue
+
+        # Count consecutive free nights for ground floor
+        gap_length = 0
+        for gdi in range(14):  # Ground can have longer gaps
+            gd = today + timedelta(days=di + gdi)
+            gd_str = fmt(gd)
+            gd_disp = GROUND_UNITS - otb_ground.get(gd_str, 0)
+            if gd_disp >= 1:
+                gap_length += 1
+            else:
+                break
+
+        if gap_length < 2:
+            di += 1
+            continue
+
+        season_code = config.SEASON_CODE[d.month]
+        default_ms = config.DEFAULT_MIN_STAY.get(season_code, 3)
+
+        # Ground floor: always set minStay to fit the gap
+        if gap_length < default_ms:
+            min_stay_gap = max(gf_absolute_min, gap_length)
+            premium_gap = 1.18 if gap_length <= 2 else 1.10
+        else:
+            min_stay_gap = max(gf_absolute_min, default_ms - 1)
+            premium_gap = 1.05
+
+        # Only add to gaps dict if it improves on existing entry
+        # (upper floor might have already set a gap for this date)
+        existing = gaps.get(date_str)
+        if not existing or min_stay_gap < existing.get("minStayGapGround", 99):
+            if existing:
+                # Merge: keep upper info, add ground info
+                existing["minStayGapGround"] = min_stay_gap
+                existing["premiumGapGround"] = premium_gap
+                existing["gapLengthGround"] = gap_length
+            else:
+                gaps[date_str] = {
+                    "gapLength": gap_length,
+                    "daysOut": di,
+                    "disponibles": disponibles,
+                    "minStayGap": min_stay_gap,  # For upper (default)
+                    "premiumGap": premium_gap,
+                    "minStayGapGround": min_stay_gap,
+                    "premiumGapGround": premium_gap,
+                    "gapLengthGround": gap_length,
+                    "roomType": "ground",
+                    "surrounded": True,  # 1 unit, any gap is real
+                }
+
+        di += gap_length
+
+
+def _detect_gaps_aggregate(gaps, otb, today, horizon):
+    """Fallback: original aggregate gap detection."""
+    di = 0
+    while di < horizon:
         d = today + timedelta(days=di)
         date_str = fmt(d)
         reservadas = otb.get(date_str, 0)
@@ -90,7 +289,6 @@ def detect_gaps_dinamico(otb):
             di += 1
             continue
 
-        # Count consecutive free nights
         gap_length = 0
         for gdi in range(8):
             gd = today + timedelta(days=di + gdi)
@@ -124,8 +322,8 @@ def detect_gaps_dinamico(otb):
             "disponibles": disponibles,
             "minStayGap": min_stay_gap,
             "premiumGap": premium_gap,
+            "roomType": "aggregate",
+            "surrounded": False,
         }
 
         di += gap_length
-
-    return gaps
