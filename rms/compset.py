@@ -206,9 +206,9 @@ SELF_NAMES = [
 
 APIFY_CONFIG = {
     "actor_id": "voyager~booking-scraper",
-    "max_wait_seconds": 180,  # Subido de 120 a 180 para ventanas lejanas
+    "max_wait_seconds": 300,  # 5 min — startUrls tarda ~3min en Apify
     "poll_interval_seconds": 5,
-    "scrape_windows_days": [7, 14, 30, 60, 90],
+    "scrape_windows_days": [14, 30, 60],  # 3 ventanas: suficiente para comp set
     "profiles": {
         "default": {"nights": 3, "adults": 2},
         "summer":  {"nights": 7, "adults": 4},
