@@ -1,16 +1,17 @@
 """
-RMS Estanques v7.2 — Python/Railway Edition
+RMS Estanques v7.2.2 — Python/Railway Edition
 Main entry point — Flask server + APScheduler + webhook handler
 
-v7.2 CHANGES:
-  - read_otb_by_type() for per-room-type gap detection
-  - otb_by_type passed to calcular_precios_v7
-  - Version bumped to v7.2
+v7.2.2 CHANGES:
+  - Added threading lock to prevent concurrent run_full() executions
+  - Webhook now returns 429 if a run is already in progress
+  - Fixed: comp_updated handling (check_and_update_comp_set returns dict or None)
 """
 
 import os
 import sys
 import logging
+import threading
 from datetime import datetime, date
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -29,11 +30,34 @@ _last_results = []
 _last_audit = {}
 _last_claude = {}
 
+# ══════════════════════════════════════════
+# LOCK — Prevent concurrent pricing runs
+# ══════════════════════════════════════════
+_run_lock = threading.Lock()
+_run_in_progress = False
+
 
 def run_full():
-    """Full daily pricing pipeline."""
+    """Full daily pricing pipeline. Thread-safe with lock."""
+    global _last_results, _last_audit, _last_claude, _run_in_progress
+
+    # Non-blocking check: if already running, skip
+    if not _run_lock.acquire(blocking=False):
+        log.warning("⚠️ run_full() already in progress — skipping this trigger")
+        return {"status": "skipped", "reason": "run_already_in_progress"}
+
+    _run_in_progress = True
+    try:
+        return _run_full_inner()
+    finally:
+        _run_in_progress = False
+        _run_lock.release()
+
+
+def _run_full_inner():
+    """Actual pricing logic — only called when lock is held."""
     global _last_results, _last_audit, _last_claude
-    
+
     from rms import config
     from rms.beds24 import get_token
     from rms.otb import read_otb_by_type
@@ -46,13 +70,13 @@ def run_full():
     from rms.apply import aplicar_precios
     from rms.email_report import enviar_email_diario
     from rms.revenue import calcular_revenue_tracker, record_prices, check_feedback
-    
+
     start = datetime.now()
     log.info("══════════════════════════════════════════")
-    log.info("  RMS ESTANQUES v7.2 — Full Pricing Run")
+    log.info("  RMS ESTANQUES v7.2.2 — Full Pricing Run")
     log.info(f"  {start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("══════════════════════════════════════════")
-    
+
     try:
         # Step 1: Connect Beds24
         log.info("\n── STEP 1: Conectar Beds24 ──")
@@ -61,7 +85,7 @@ def run_full():
             log.error("  ❌ No se pudo conectar a Beds24")
             return
         log.info("  ✅ Beds24 conectado")
-        
+
         # Step 2: Capa A check (quarterly rebuild)
         log.info("\n── STEP 2: Capa A ──")
         recalibrated = check_and_recalibrate()
@@ -69,15 +93,16 @@ def run_full():
             log.info("  ✅ Capa A recalibrada")
         else:
             cargar_capa_a()
-        
-        # Step 3: Comp Set check (weekly)
+
+        # Step 3: Comp Set check (weekly, with freshness cache)
         log.info("\n── STEP 3: Comp Set ──")
         comp_updated = check_and_update_comp_set()
         if comp_updated:
-            log.info(f"  ✅ Comp Set actualizado ({len(comp_updated)} ventanas)")
+            n_windows = len(comp_updated.get("by_window", {}))
+            log.info(f"  ✅ Comp Set actualizado ({n_windows} ventanas)")
         else:
-            log.info("  Usando ADR_PEER existente")
-        
+            log.info("  Comp Set cache vigente — usando datos existentes")
+
         # Step 4: Vacaciones check (monthly)
         log.info("\n── STEP 4: Vacaciones escolares ──")
         vac_updated = check_and_update_vacaciones()
@@ -97,19 +122,19 @@ def run_full():
                 log.info("  Usando datos de mercado existentes")
         except Exception as e:
             log.warning(f"  Market intelligence error: {e}")
-            
+
         # Step 5: Load data — NOW WITH PER-TYPE OTB
         log.info("\n── STEP 5: Cargar datos ──")
         otb, otb_by_type = read_otb_by_type()
         log.info(f"  ✅ OTB: {len(otb)} fechas (per-type loaded)")
         events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
-        
+
         # Step 6: Calculate prices v7.2 — WITH otb_by_type
         log.info("\n── STEP 6: Calcular precios v7.2 ──")
         results = calcular_precios_v7(otb, events, otb_by_type=otb_by_type)
         log.info(f"  ✅ {len(results)} días calculados")
-        
+
         # Step 7: Audit
         log.info("\n── STEP 7: Auditar ──")
         audit = audit_results(results)
@@ -119,7 +144,7 @@ def run_full():
             log.warning(f"  ❌ Auditoría FALLIDA: {audit['alertas']}")
         for w in audit.get("warnings", []):
             log.warning(f"  ⚠️ {w}")
-        
+
         # Step 8: Claude API optimization
         log.info("\n── STEP 8: Claude API ──")
         claude_result = {}
@@ -128,11 +153,11 @@ def run_full():
             results = optimize_with_claude(results, otb)
         except Exception as e:
             log.warning(f"  Claude API error: {e}")
-        
+
         # Step 9: Apply prices
         log.info("\n── STEP 9: Aplicar precios ──")
         apply_result = aplicar_precios(results)
-        
+
         # Step 10: Revenue tracker
         log.info("\n── STEP 10: Revenue Tracker ──")
         try:
@@ -140,7 +165,7 @@ def run_full():
         except Exception as e:
             log.warning(f"  Revenue tracker error: {e}")
             tracker = {}
-        
+
         # Step 11: Feedback check
         log.info("\n── STEP 11: Feedback ──")
         try:
@@ -149,27 +174,30 @@ def run_full():
         except Exception as e:
             log.warning(f"  Feedback error: {e}")
             feedback = []
-        
+
         # Step 12: Alerts
         log.info("\n── STEP 12: Alertas ──")
         alerts = run_alerts(otb)
-        
+
         # Step 13: Email
         log.info("\n── STEP 13: Email diario ──")
         try:
             enviar_email_diario(results, audit, alerts, claude_result)
         except Exception as e:
             log.warning(f"  Email error: {e}")
-        
+
         _last_results = results
         _last_audit = audit
         _last_claude = claude_result
-        
+
         elapsed = (datetime.now() - start).total_seconds()
-        log.info(f"\n✅ RMS v7.2 completado en {elapsed:.1f}s")
-        
+        log.info(f"\n✅ RMS v7.2.2 completado en {elapsed:.1f}s")
+
+        return {"status": "ok", "days": len(results), "elapsed": elapsed}
+
     except Exception as e:
         log.error(f"❌ Error fatal: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 def audit_results(results):
@@ -179,11 +207,11 @@ def audit_results(results):
     ok = True
     dias_suelo = 0
     dias_techo = 0
-    
+
     if not results or len(results) < 30:
         alertas.append(f"Solo {len(results) if results else 0} días calculados")
         ok = False
-    
+
     if results:
         for r in results:
             pf = r.get("precioFinal", 0)
@@ -193,12 +221,12 @@ def audit_results(results):
             elif pf > 2000:
                 alertas.append(f"Precio muy alto: {r['date']} → {pf}€")
                 ok = False
-            
+
             ms = r.get("minStay", 0)
             if ms < 1 or ms > 14:
                 alertas.append(f"MinStay inválido: {r['date']} → {ms}")
                 ok = False
-            
+
             month = int(r["date"][5:7])
             if month == 7 and pf < 200:
                 alertas.append(f"Julio muy bajo: {r['date']} → {pf}€")
@@ -206,17 +234,17 @@ def audit_results(results):
             if month == 8 and pf < 220:
                 alertas.append(f"Agosto muy bajo: {r['date']} → {pf}€")
                 ok = False
-            
+
             if r.get("clampedBy") == "SUELO":
                 dias_suelo += 1
             if r.get("clampedBy") == "TECHO":
                 dias_techo += 1
-        
+
         if dias_suelo > 60:
             warnings.append(f"{dias_suelo} días limitados por SUELO")
         if dias_techo > 20:
             warnings.append(f"{dias_techo} días limitados por TECHO")
-    
+
     return {"ok": ok, "alertas": alertas, "warnings": warnings}
 
 
@@ -227,12 +255,21 @@ def audit_results(results):
 @app.route("/webhook/booking", methods=["POST"])
 def webhook_booking():
     log.info("📨 Webhook recibido: booking event")
+
+    if _run_in_progress:
+        log.info("  ⏳ Run in progress — webhook queued as skip")
+        return jsonify({
+            "status": "skipped",
+            "reason": "pricing_run_in_progress",
+            "message": "Another run is active. Prices will reflect this booking on next run."
+        }), 429
+
     try:
         data = request.get_json(silent=True) or {}
         booking_id = data.get("bookingId") or data.get("id") or "unknown"
         log.info(f"  Booking ID: {booking_id}")
-        run_full()
-        return jsonify({"status": "ok", "action": "repricing_triggered"})
+        result = run_full()
+        return jsonify({"status": "ok", "action": "repricing_triggered", "result": result})
     except Exception as e:
         log.error(f"  Webhook error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -248,18 +285,22 @@ def health():
     next_run = str(scheduler_job.next_run_time) if scheduler_job else "not scheduled"
     return jsonify({
         "status": "ok",
-        "service": "RMS Estanques v7.2",
+        "service": "RMS Estanques v7.2.2",
         "next_run": next_run,
+        "run_in_progress": _run_in_progress,
     })
 
 
 @app.route("/run")
 def trigger_run():
-    run_full()
+    if _run_in_progress:
+        return jsonify({"status": "busy", "message": "Run already in progress"}), 429
+    result = run_full()
     return jsonify({
         "status": "ok",
         "results": len(_last_results),
         "audit": _last_audit,
+        "run_result": result,
     })
 
 
@@ -267,25 +308,25 @@ def trigger_run():
 def prices_compare():
     if not _last_results:
         return "No results yet. Hit /run first.", 404
-    
+
     lines = []
     header = f"{'Fecha':<11}| {'Disp':>4} | {'Precio PY':>10} | {'Genius':>7} | {'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | {'DispV':>5} | {'Fcst':>4} | {'Clamp':>5} | {'MinSt':>5} | {'MnGnd':>5} | {'Vac':>4} | {'Mkt':>4}"
     lines.append(header)
     lines.append("-" * len(header))
-    
+
     for r in _last_results:
         month = int(r["date"][5:7])
         if month < 7 or month > 8:
             continue
         if r["date"] > "2026-08-15":
             continue
-        
+
         lines.append(
             f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>7}€ | {r['precioGenius']:>5}€ | {r.get('suelo',''):>5} | {r.get('techo',''):>5} | "
             f"{r.get('precioNeto',''):>5} | {r.get('dispVirtual',''):>5} | {r.get('forecastDemanda',''):>4} | {r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | "
             f"{r.get('minStayGround',''):>5} | {r.get('vacFactor',1.0):>4} | {r.get('marketFactor',1.0):>4}"
         )
-    
+
     return "<pre>" + "\n".join(lines) + "</pre>"
 
 
