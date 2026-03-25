@@ -1,6 +1,6 @@
 """
-Comp Set — Apify scraping of 8 Booking.com competitors
-v7.1.1: Corrected profiles (2 adults always), added +60/+90 windows
+Comp Set — Apify scraping of Booking.com competitors
+v7.2.1: Filter results to real comp set, 3 windows only, longer timeout
 
 These are the REAL competitors from Booking.com peer group.
 AirROI gives market-level data; Apify gives competitor-specific prices.
@@ -22,39 +22,54 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 APIFY_ACTOR = "voyager~booking-scraper"
 APIFY_BASE = "https://api.apify.com/v2"
 
-# The 8 real competitors from Booking.com peer group
-COMP_SET_URLS = [
-    "https://www.booking.com/hotel/es/apartamentos-piza.es.html",
-    "https://www.booking.com/hotel/es/apartamentos-lemar-colonia-de-sant-jordi.es.html",
-    "https://www.booking.com/hotel/es/aparthotelisladecabrera.es.html",
-    "https://www.booking.com/hotel/es/blue-house-mallorca.es.html",
-    "https://www.booking.com/hotel/es/apartamentos-ibiza-colonia-de-sant-jordi1.es.html",
-    "https://www.booking.com/hotel/es/villa-piccola-by-cassai.es.html",
-    "https://www.booking.com/hotel/es/edificio-puerto.es.html",
-    "https://www.booking.com/hotel/es/apartamentos-lago.es.html",
-    "https://www.booking.com/hotel/es/apartamentos.es.html",
+# The real competitors — used to FILTER scrape results
+COMP_SET_NAMES_FILTER = [
+    "apartamentos piza",
+    "apartamentos lemar",
+    "aparthotel isla de cabrera",
+    "blue house",
+    "apartamentos ibiza",
+    "villa piccola",
+    "edificio puerto",
+    "apartamentos lago",
+    "lavendel",
+    "apartamento es trenc",
+    "apartamento estándar",
+    "edificio príncipe",
+    "ses baules",
+    "can vidal",
+    "hotel isla de cabrera",
+    "bluewater",
+    "apartaments andreas",
+    "apartaments posidonia",
 ]
 
-COMP_SET_NAMES = [
-    "Apartamentos Piza", "Apartamentos Lemar", "Aparthotel Isla de Cabrera",
-    "Blue House Mallorca", "Apartamentos Ibiza", "Villa Piccola by Cassai",
-    "Apartaments Edificio Puerto", "Apartamentos Lago", "Lavendel Apartments",
-]
+# Only 3 windows — saves cost and covers short/medium/long term
+SCRAPE_WINDOWS_DAYS = [7, 30, 60]
 
-# Scrape windows: days ahead to check
-# Added +60 and +90 for summer advance booking visibility
-SCRAPE_WINDOWS_DAYS = [7, 14, 30, 45, 60, 90]
-
-# FIXED: Always 2 adults for comparable base price
-# Summer uses 7 nights (typical booking), winter uses 3 nights
 SCRAPE_PROFILES = {
     "DEFAULT": {"nights": 3, "adults": 2},
-    "SUMMER": {"nights": 7, "adults": 2},  # Was 4, now 2 for fair comparison
+    "SUMMER": {"nights": 7, "adults": 2},
 }
 
 SUMMER_MONTHS = [6, 7, 8, 9]
-MAX_WAIT_SECONDS = 120
+
+MAX_WAIT_SECONDS = 180  # Increased from 120
 POLL_INTERVAL = 5
+
+
+def _is_comp_set(name):
+    """Check if a property name matches our comp set."""
+    if not name:
+        return False
+    name_lower = name.lower()
+    # Exclude ourselves
+    if "estanques" in name_lower:
+        return False
+    for comp in COMP_SET_NAMES_FILTER:
+        if comp in name_lower:
+            return True
+    return False
 
 
 def apify_run_and_wait(scrape_input):
@@ -63,12 +78,12 @@ def apify_run_and_wait(scrape_input):
         return None
 
     url = f"{APIFY_BASE}/acts/{APIFY_ACTOR}/runs?token={APIFY_TOKEN}"
+
     try:
         resp = requests.post(url, json=scrape_input, timeout=30)
         if resp.status_code != 201:
             log.warning(f"  Apify start failed: {resp.status_code}")
             return None
-
         run_data = resp.json().get("data", {})
         run_id = run_data.get("id")
         if not run_id:
@@ -81,7 +96,6 @@ def apify_run_and_wait(scrape_input):
     while elapsed < MAX_WAIT_SECONDS:
         time.sleep(POLL_INTERVAL)
         elapsed += POLL_INTERVAL
-
         try:
             status_url = f"{APIFY_BASE}/actor-runs/{run_id}?token={APIFY_TOKEN}"
             status_resp = requests.get(status_url, timeout=15)
@@ -118,8 +132,7 @@ def scrape_comp_set(check_in, check_out, adults=2):
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
-        "propertyUrls": COMP_SET_URLS,
-        "maxResults": 10,
+        "maxResults": 30,
     }
 
     results = apify_run_and_wait(scrape_input)
@@ -127,12 +140,20 @@ def scrape_comp_set(check_in, check_out, adults=2):
         return []
 
     nights = (date.fromisoformat(check_out) - date.fromisoformat(check_in)).days
-    parsed = []
 
+    parsed = []
+    skipped = 0
     for r in results:
+        name = r.get("name") or r.get("hotel_name") or "Desconocido"
+
+        # FILTER: only keep comp set properties
+        if not _is_comp_set(name):
+            skipped += 1
+            continue
+
         price = r.get("price") or r.get("room_price") or r.get("min_price") or 0
         parsed.append({
-            "name": r.get("name") or r.get("hotel_name") or "Desconocido",
+            "name": name,
             "checkIn": check_in,
             "checkOut": check_out,
             "price": price,
@@ -141,14 +162,14 @@ def scrape_comp_set(check_in, check_out, adults=2):
             "reviewCount": r.get("reviewCount", 0),
         })
 
+    if skipped > 0:
+        log.info(f"    Filtrado: {len(parsed)} comp set de {len(results)} total ({skipped} descartados)")
+
     return parsed
 
 
 def actualizar_comp_set():
-    """
-    Full comp set update via Apify.
-    Scrapes all windows, calculates ADR by month, updates config.
-    """
+    """Full comp set update via Apify."""
     if not APIFY_TOKEN:
         log.info("  No APIFY_TOKEN — comp set not updated")
         return None
@@ -162,7 +183,6 @@ def actualizar_comp_set():
         ci = today + timedelta(days=days_out)
         ci_month = ci.month
         is_summer = ci_month in SUMMER_MONTHS
-
         profile = SCRAPE_PROFILES["SUMMER"] if is_summer else SCRAPE_PROFILES["DEFAULT"]
         co = ci + timedelta(days=profile["nights"])
 
@@ -175,7 +195,7 @@ def actualizar_comp_set():
         if results:
             prices = [r["pricePerNight"] for r in results if r["pricePerNight"] > 0]
 
-            # Trimmed mean (remove highest and lowest if enough data)
+            # Trimmed mean if enough data
             if len(prices) >= 4:
                 prices.sort()
                 prices = prices[1:-1]
@@ -192,13 +212,11 @@ def actualizar_comp_set():
             })
 
             log.info(f"    +{days_out}d: ADR comp set = {adr_cs}€ ({len(prices)} props)")
-
-            # Log individual competitor prices
             for r in results:
                 if r["pricePerNight"] > 0:
                     log.info(f"      {r['name'][:30]}: {r['pricePerNight']}€/noche")
 
-        time.sleep(3)  # Rate limiting
+        time.sleep(3)
 
     if not all_results:
         log.warning("  No comp set data retrieved")
@@ -218,12 +236,13 @@ def actualizar_comp_set():
         updated_months.append(f"M{month}: {old}→{avg_adr}€")
 
     log.info(f"  ✅ ADR_PEER actualizado: {', '.join(updated_months)}")
+
     return all_results
 
 
 def check_and_update_comp_set():
     """Called daily — only runs on Wednesdays."""
     today = date.today()
-    if today.weekday() != 2:  # Wednesday = 2
+    if today.weekday() != 2:
         return None
     return actualizar_comp_set()
