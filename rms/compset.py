@@ -1,5 +1,5 @@
 # ============================================================
-# COMP SET — RMS Estanques v7.2.1
+# COMP SET — RMS Estanques v7.2.2
 # ============================================================
 #
 # DOS NIVELES DE COMP SET:
@@ -15,9 +15,12 @@
 #
 # Fuente: BDC "Alojamientos comparables" actualizado 10-mar-2026.
 # Basado en clics, vistas y reservas reales de viajeros.
+#
+# v7.2.2: Añadido check_and_update_comp_set() requerido por main.py
 # ============================================================
 
 import logging
+import os
 import time
 import requests
 from datetime import datetime, timedelta
@@ -454,3 +457,74 @@ def scrape_comp_set(apify_token, windows_config=None):
         "market_results": market_results,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ════════════════════════════════════════════════════════════
+# ORQUESTADOR — check_and_update_comp_set
+# Llamado por main.py Step 3. Decide si toca scrapear.
+# ════════════════════════════════════════════════════════════
+
+# Estado interno: timestamp del último scrape exitoso
+_last_scrape_ts = None
+
+
+def check_and_update_comp_set():
+    """
+    Comprueba si el comp set necesita actualizarse (scrape periódico).
+    - Si el último scrape fue hace < APIFY_MAX_AGE_DAYS → None (sin cambios)
+    - Si toca → ejecuta scrape_comp_set() y actualiza config.COMP_SET["ADR_PEER"]
+    - Retorna dict con resultados por ventana si se actualizó, None si no.
+    """
+    global _last_scrape_ts
+
+    from rms import config
+
+    apify_token = os.getenv("APIFY_TOKEN", "")
+    if not apify_token:
+        logger.warning("  No Apify token — saltando comp set update")
+        return None
+
+    max_age_days = config.COMP_SET.get("APIFY_MAX_AGE_DAYS", 14)
+
+    # Check if we need to scrape
+    if _last_scrape_ts:
+        age = (datetime.now() - _last_scrape_ts).total_seconds() / 86400
+        if age < max_age_days:
+            logger.info(f"  Comp set fresh ({age:.1f}d < {max_age_days}d) — skip")
+            return None
+
+    logger.info("  Ejecutando scrape de comp set...")
+
+    try:
+        data = scrape_comp_set(apify_token)
+    except Exception as e:
+        logger.error(f"  Scrape error: {e}")
+        return None
+
+    if not data or not data.get("by_window"):
+        logger.warning("  Scrape sin resultados")
+        return None
+
+    # Actualizar ADR_PEER en config con datos frescos de pricing peers
+    updated_months = {}
+    for days_out, window in data["by_window"].items():
+        if window.get("adr_peers") and window["adr_peers"] > 0:
+            ci = datetime.strptime(window["check_in"], "%Y-%m-%d")
+            month = ci.month
+            old_adr = config.COMP_SET["ADR_PEER"].get(month, 0)
+            new_adr = window["adr_peers"]
+
+            # Solo actualizar si hay cambio significativo (>5€)
+            if abs(new_adr - old_adr) > 5:
+                config.COMP_SET["ADR_PEER"][month] = new_adr
+                updated_months[month] = {"old": old_adr, "new": new_adr, "days_out": days_out}
+                logger.info(f"    ADR_PEER mes {month}: {old_adr}€ → {new_adr}€ (ventana +{days_out}d)")
+
+    _last_scrape_ts = datetime.now()
+
+    if updated_months:
+        logger.info(f"  ✅ ADR_PEER actualizado: {len(updated_months)} meses")
+    else:
+        logger.info("  ADR_PEER sin cambios significativos")
+
+    return data["by_window"]
