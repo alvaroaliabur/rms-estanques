@@ -1,5 +1,11 @@
 """
-RMS v7.2 Pricing Engine — Forecast → Optimize → Execute → Smooth
+RMS v7.2.2 Pricing Engine — Forecast → Optimize → Execute → Smooth
+
+CHANGES from v7.2:
+  - v7.2.2: Market factor DISABLED — AirROI data still collected for reporting
+    but no longer adjusts pricing. With 9 units, market-level occ is not a
+    useful pricing signal. OTB + pace + pickup already capture demand.
+  - v7.2.2: Ground floor +10% premium handled in apply.py
 
 CHANGES from v7.1:
   - Market intelligence factor integrated into forecast
@@ -94,38 +100,22 @@ def get_unconstrained_uplift(segment, disponibles):
 
 
 # ══════════════════════════════════════════
-# MARKET FACTOR — Uses AirROI data
+# MARKET FACTOR — AirROI data
 # ══════════════════════════════════════════
 
 def get_market_factor(date_str):
     """
-    Compare our occupancy vs market occupancy.
-    If market is much hotter than us, we can push prices.
-    If market is cooler, we might be overpriced.
-    
-    Returns a factor: 0.95 - 1.10
+    Market factor from AirROI data.
+
+    DISABLED (v7.2.2): With 9 units, market-level occupancy from AirROI
+    is not a useful signal for pricing. Our OTB + pace + pickup already
+    capture demand signals. AirROI data still feeds the email report
+    and logs for context/monitoring.
+
+    TODO post go-live: consider reactivating with forward pacing comparison
+    (market forward pacing vs our OTB at same horizon) instead of
+    comparing market occ vs our historical final occ.
     """
-    if not hasattr(config, 'MARKET_OCC') or not config.MARKET_OCC:
-        return 1.0
-
-    month = int(date_str[5:7])
-    market_occ = config.MARKET_OCC.get(month)
-    if not market_occ:
-        return 1.0
-
-    # Compare market occ to our segment historical occ
-    seg = f"{month}-WD"
-    our_occ = SEGMENT_OCC_HIST.get(seg, 50) / 100.0
-
-    # If market is significantly hotter than our historical
-    diff = market_occ - our_occ
-    if diff > 0.10:
-        # Market 10%+ ahead: opportunity to push
-        return min(1.10, 1.0 + diff * 0.5)
-    elif diff < -0.10:
-        # Market 10%+ behind: we might be overpriced
-        return max(0.95, 1.0 + diff * 0.3)
-
     return 1.0
 
 
@@ -179,7 +169,7 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
     # 6. School holidays — NOW CONNECTED
     ajuste_vac = clamp(cfg["VAC_MIN"], get_vacaciones_factor(date_str), cfg["VAC_MAX"])
 
-    # 7. Market factor — NEW
+    # 7. Market factor — DISABLED v7.2.2 (returns 1.0)
     ajuste_market = get_market_factor(date_str)
 
     # 8. Forecast final
@@ -394,10 +384,10 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
         "suelo": suelo, "techo": techo,
         "clampedBy": clamped_by,
         "minStay": min_stay,
-        "minStayGround": min_stay_ground,  # NEW: independent ground minStay
+        "minStayGround": min_stay_ground,
         "losRazon": los_razon, "losReduccion": los_reduccion, "losPremium": los_premium,
         "gapOverride": gap_override,
-        "gapOverrideGround": gap_override_ground,  # NEW
+        "gapOverrideGround": gap_override_ground,
         "minRevApplied": min_rev_applied,
         "minRevPerNight": round(min_rev_per_night),
         "mediaVendida": round(media_vendida),
@@ -501,8 +491,8 @@ def smooth(results):
 
 def calcular_precios_v7(otb, events, otb_by_type=None):
     """
-    Full v7.2 pricing pipeline.
-    
+    Full v7.2.2 pricing pipeline.
+
     Args:
         otb: Standard OTB dict
         events: Events list
@@ -553,7 +543,7 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
             "seasonalFloor": ej["suelo"],
             "techo": ej["techo"],
             "minStay": ej["minStay"],
-            "minStayGround": ej.get("minStayGround", ej["minStay"]),  # NEW
+            "minStayGround": ej.get("minStayGround", ej["minStay"]),
             "daysOut": di,
             "occNow": ej["occNow"],
             "isWeekend": ej["isWeekend"],
@@ -561,7 +551,7 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
             "eventFactor": ej["eventFactor"],
             "clampedBy": ej["clampedBy"],
             "gapOverride": ej["gapOverride"],
-            "gapOverrideGround": ej.get("gapOverrideGround", False),  # NEW
+            "gapOverrideGround": ej.get("gapOverrideGround", False),
             "losRazon": ej["losRazon"] or "",
             "losReduccion": ej["losReduccion"] or 0,
             "losPremium": ej["losPremium"] or 1.0,
@@ -580,8 +570,8 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
             "basePostEvent": round(opt["precioNeto"] * ej["eventFactor"]) if ej["eventFactor"] > 1 else opt["precioNeto"],
             "fOTB": 1.0, "fPickup": 1.0, "fPace": 1.0, "fTotal": 1.0,
             "paceRatio": fc["desglose"]["pace"],
-            "marketFactor": mf,  # NOW ACTIVE
-            "vacFactor": fc["desglose"].get("vac", 1.0),  # NEW: track vac factor
+            "marketFactor": mf,
+            "vacFactor": fc["desglose"].get("vac", 1.0),
             "uncUplift": opt.get("uncUplift", 1.0),
         })
 
@@ -592,7 +582,7 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
     for r in results:
         r["precioGenius"] = round(r["precioFinal"] * 0.85)
 
-    log.info(f"  ✅ v7.2: {len(results)} días calculados")
+    log.info(f"  ✅ v7.2.2: {len(results)} días calculados")
     if unc_count > 0:
         log.info(f"  📈 Demanda no restringida: {unc_count} fechas con uplift")
     if market_adjusted > 0:
