@@ -99,10 +99,11 @@ def explicar_fecha(r):
     lines.append(f"<div class='precio-final'>{precio_final}€ <span class='genius'>(Genius: {precio_genius}€)</span></div>")
 
     # ── 1. Context ──
+    libres_txt = "libre" if disp == 1 else "libres"
     lines.append(f"<p><strong>Temporada:</strong> {season_name}. "
                  f"Faltan <strong>{days_out} días</strong>. "
-                 f"<strong>{reservadas}</strong> de 9 apartamentos reservados, "
-                 f"quedan <strong>{disp}</strong> libres.</p>")
+                 f"Hay <strong>{reservadas} de 9</strong> apartamentos reservados, "
+                 f"queda{'n' if disp != 1 else ''} <strong>{disp}</strong> {libres_txt}.</p>")
 
     # ── 2. Capa A base price ──
     seg = r.get("segment", "")
