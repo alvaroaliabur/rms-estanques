@@ -19,7 +19,7 @@ from rms import config
 log = logging.getLogger(__name__)
 
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
-APIFY_ACTOR = "dtrber~booking-scraper"
+APIFY_ACTOR = "voyager~booking-scraper"
 APIFY_BASE = "https://api.apify.com/v2"
 
 # The 8 real competitors from Booking.com peer group
