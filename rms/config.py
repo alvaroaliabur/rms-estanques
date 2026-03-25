@@ -1,16 +1,20 @@
 """
 RMS Estanques — Configuration
-All pricing parameters, property details, and system settings.
+v7.4 — 25 marzo 2026
 
-UPDATED: v7.3 — 25 marzo 2026
-- 3 años de histórico para fill curves (velocidad de reserva, NO precios)
-- CURVE_WEIGHTS ponderados: 2025 pesa 50%, 2024 35%, 2023 15%
-- Revenue tracker compara vs MEJOR año histórico (no solo LY)
-- Techos calibrados con datos reales (max vendido 468€)
-- Floors subidos para proteger últimas unidades en verano
-- preciosPorDisp julio/agosto importados de GAS CAPA_A_OVERRIDE_UA
-- Comp set reducido a 6 peers reales (<1.5km)
-- RECORDAR: precios en Beds24, Genius descuenta 15% al huésped
+CAMBIOS v7.4:
+- MONTHLY_FLOOR derivado de ADR real del mejor año histórico (Booking Analytics)
+  Suelo = best_ADR_genius / 0.85 (convertir a precio Beds24 pre-Genius)
+  Ya no son números inventados — reflejan lo que el mercado demostró pagar
+- HISTORICAL_YEARS = [2023, 2024, 2025] con pesos ponderados
+  2025 fue año récord (+14%) — no penalizar 2026 por ir más lento que un año excepcional
+- BOOKING_ANALYTICS: fuente de verdad para peer group
+  Actualización manual mensual vía email del RMS (día 1 de cada mes)
+  Reemplaza Apify como referencia de precio — Apify pasa a señal de mercado general
+- COMP_SET_ADJ: umbrales corregidos
+  Estanques es premium +15-19% sobre peers — eso es CORRECTO, no señal de bajar
+  Ratio anterior 1.25/1.40 penalizaba exactamente el posicionamiento correcto
+- URGENCY_MULTIPLIERS eliminados de config — lógica movida a pricing.py
 """
 
 import os
@@ -29,7 +33,7 @@ ALERT_EMAIL = "alvaro.estanques@gmail.com"
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 # ══════════════════════════════════════════
-# CREDENTIALS (from environment variables)
+# CREDENTIALS
 # ══════════════════════════════════════════
 BEDS24_REFRESH_TOKEN = os.getenv("BEDS24_REFRESH_TOKEN", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
@@ -38,23 +42,14 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SHEET_ID = os.getenv("SHEET_ID", "1aL5--wWdHiQV_G30YcbLKzt4stoPI_Ma24Me1QSTcEc")
 
 # ══════════════════════════════════════════
-# PRICING HORIZON + HISTORICAL DATA
-# v7.3: 3 años de histórico para fill curves robustas
-# Los PRECIOS de 2023 son irrelevantes, pero la VELOCIDAD
-# de reserva (cuántos reservados a X días vista) sí vale.
+# PRICING HORIZON
 # ══════════════════════════════════════════
 PRICING_HORIZON = 365
 
-_current_year = datetime.now().year
-HISTORICAL_YEARS = [_current_year - 3, _current_year - 2, _current_year - 1]
-# 2026: [2023, 2024, 2025] | 2027: [2024, 2025, 2026] | etc.
-
-# Pesos: año más reciente pesa más
-CURVE_WEIGHTS = {
-    _current_year - 3: 0.15,   # 2023: poco peso (pricing era distinto)
-    _current_year - 2: 0.35,   # 2024: peso medio
-    _current_year - 1: 0.50,   # 2025: benchmark principal
-}
+# v7.4: 3 años para fill curves y pace — no depender solo del año récord 2025
+# 2025 fue +14% excepcional; pesar más pero no ignorar 2023/2024
+HISTORICAL_YEARS = [2023, 2024, 2025]
+CURVE_WEIGHTS = {2023: 0.20, 2024: 0.35, 2025: 0.45}
 
 # ══════════════════════════════════════════
 # SEASONS
@@ -65,14 +60,32 @@ SEASON_CODE = {
 }
 
 # ══════════════════════════════════════════
-# SEGMENT BASE — Real Capa A from production
+# BOOKING ANALYTICS — Fuente de verdad para peer group
+#
+# Actualizar manualmente cada mes 1 cuando llegue el email del RMS.
+# Datos de Booking.com Analytics portal → Comparativa con grupo de referencia.
+# Son reservas REALES pagadas, no precios escaparate como Apify.
+#
+# our_adr: tu ADR Genius real ese mes
+# ref_adr: ADR medio del grupo de referencia (26 propiedades BDC)
+# rank_adr: tu posición en ADR dentro del grupo (1=más caro)
+# rank_nights: tu posición en noches vendidas (1=más noches)
+# total_props: total propiedades en el grupo
+#
+# Última actualización: marzo 2026
+# ══════════════════════════════════════════
+BOOKING_ANALYTICS = {
+    6: {"our_adr": 196, "ref_adr": 170, "rank_adr": 8,  "rank_nights": 14, "total_props": 26, "updated": "2026-03"},
+    7: {"our_adr": 283, "ref_adr": 238, "rank_adr": 7,  "rank_nights": 11, "total_props": 26, "updated": "2026-03"},
+    8: {"our_adr": 298, "ref_adr": 252, "rank_adr": 7,  "rank_nights": 22, "total_props": 26, "updated": "2026-03"},
+    9: {"our_adr": 204, "ref_adr": 177, "rank_adr": 7,  "rank_nights": 10, "total_props": 26, "updated": "2026-03"},
+}
+
+# ══════════════════════════════════════════
+# SEGMENT BASE — Capa A
 # preciosPorDisp: {1: price_1_free, ..., 9: price_9_free}
-#
-# NOTA: Estos precios van a Beds24. El huésped Genius ve ~85% de esto.
-# Ejemplo: disp=1 agosto WD = 440€ en Beds24 → Genius paga 374€
-#
-# v7.2.1: julio y agosto recalibrados con datos de GAS CAPA_A_OVERRIDE_UA
-# que generaron el revenue real de 2025. Techos bajados a valores realistas.
+# Precios en Beds24. Genius ve ~85%.
+# Se recalibra trimestralmente desde Beds24 histórico (capa_a.py).
 # ══════════════════════════════════════════
 SEGMENT_BASE = {
     "1-WD": {"code": "B",  "base": 40,  "suelo": 35,  "techo": 105,
@@ -128,7 +141,7 @@ SEGMENT_BASE = {
 CHECKPOINTS = [120, 105, 90, 75, 60, 45, 30, 21, 14, 10, 7, 3, 0]
 
 # ══════════════════════════════════════════
-# PRICE SLOTS (Beds24 calendar fields)
+# PRICE SLOTS
 # ══════════════════════════════════════════
 PRICE_SLOTS = {
     "STANDARD": "price1",
@@ -164,16 +177,38 @@ DURATION_DISCOUNTS = {
 
 # ══════════════════════════════════════════
 # FLOORS & CEILINGS
-# Todos los precios = lo que va a Beds24
-# Genius = precio * 0.85 (lo que ve el huésped)
+#
+# v7.4: MONTHLY_FLOOR = best_ADR_genius / 0.85
+# Derivado del ADR real del mejor año histórico convertido a precio Beds24.
+# Lógica: si el mercado demostró pagar ese ADR de media, ese es nuestro suelo.
+# No vendemos por menos de lo que el mercado ya pagó.
+#
+# Fuente de best_ADR_genius por mes → /revenue endpoint (campo best_adr)
 # ══════════════════════════════════════════
 SEASONAL_FLOOR = {
     "B": 75, "MB": 90, "M": 140, "MA": 165, "A": 235, "UA": 395,
 }
 
+# v7.4: Suelos calibrados desde ADR real del mejor año
+# best_ADR_genius / 0.85 = precio Beds24 equivalente
+# Ene-May/Oct-Dic: sin cambios significativos
+# Jun: 201€/0.85 = 237€  (antes 260€ → 9% más alto que el promedio real)
+# Jul: 282€/0.85 = 332€  (antes 390€ → 17% más alto que el promedio real)
+# Ago: 308€/0.85 = 362€  (antes 440€ → 21% más alto que el promedio real)
+# Sep: 184€/0.85 = 216€  (antes 280€ → 29% más alto que el promedio real)
 MONTHLY_FLOOR = {
-    1: 60, 2: 65, 3: 95, 4: 130, 5: 170, 6: 260,
-    7: 390, 8: 440, 9: 280, 10: 175, 11: 70, 12: 85,
+    1:  60,   # best ADR Genius ~68€
+    2:  65,   # best ADR Genius ~79€
+    3:  95,   # best ADR Genius ~85€
+    4: 115,   # best ADR Genius ~115€ (Booking Analytics dato real)
+    5: 139,   # best ADR Genius ~139€
+    6: 237,   # best ADR Genius 201€ / 0.85 = 237€ ← bajado de 260€
+    7: 332,   # best ADR Genius 282€ / 0.85 = 332€ ← bajado de 390€
+    8: 362,   # best ADR Genius 308€ / 0.85 = 362€ ← bajado de 440€
+    9: 216,   # best ADR Genius 184€ / 0.85 = 216€ ← bajado de 280€
+   10: 165,   # best ADR Genius ~140€
+   11:  70,
+   12:  85,
 }
 
 MONTHLY_CEILING = {
@@ -200,6 +235,7 @@ MIN_BOOKING_REVENUE = {
 
 # ══════════════════════════════════════════
 # GENIUS COMPENSATION
+# precio_publicado = precio_neto * 1.18
 # ══════════════════════════════════════════
 GENIUS_COMPENSATION = 1.18
 
@@ -215,13 +251,6 @@ MIN_STAY_REDUCTION = {
     "absolute_min_winter": 3,
     "days_close": 21,
     "days_very_close": 7,
-}
-
-MIN_STAY_DYNAMIC = {
-    "below_pace_threshold": -0.15,
-    "below_pace_severe": -0.30,
-    "above_pace_threshold": 0.10,
-    "above_pace_strong": 0.25,
 }
 
 # ══════════════════════════════════════════
@@ -271,6 +300,10 @@ LAST_MINUTE_WINTER = {
 
 # ══════════════════════════════════════════
 # COMP SET
+#
+# ADR_PEER: mediana de pricing peers (Apify scraping semanal)
+# Usado solo como señal de movimiento relativo, NO como referencia absoluta.
+# La referencia absoluta es BOOKING_ANALYTICS.ref_adr.
 # ══════════════════════════════════════════
 COMP_SET = {
     "enabled": True,
@@ -294,7 +327,7 @@ GROUND_FLOOR_LOS = {
 }
 
 # ══════════════════════════════════════════
-# EVENTS CONFIG
+# EVENTS
 # ══════════════════════════════════════════
 EVENTS_OVERLAP_RULE = "MAX"
 
@@ -331,11 +364,15 @@ V7 = {
         "MAX_VARIACION_DIARIA": 0.12,
     },
 
+    # v7.4: umbrales corregidos — Estanques es premium +15-19% sobre peers
+    # Ratio anterior 1.25/1.40 penalizaba nuestro posicionamiento correcto
+    # Nuevo: solo moderar si estamos >60% por encima de peers (señal de fallo)
+    # En UA/A: desactivado en pricing.py — el premium de verano es correcto
     "COMP_SET_ADJ": {
-        "RATIO_ALTO": 1.40,
-        "FACTOR_ALTO": 0.95,
-        "RATIO_MEDIO": 1.25,
-        "FACTOR_MEDIO": 0.98,
+        "RATIO_ALTO": 1.60,    # antes 1.40 — solo moderar si >60% sobre peers
+        "FACTOR_ALTO": 0.97,   # moderación suave
+        "RATIO_MEDIO": 1.45,   # antes 1.25
+        "FACTOR_MEDIO": 0.99,  # casi sin efecto
     },
 }
 
@@ -368,7 +405,7 @@ ALERTAS_ANOMALIAS = {
 }
 
 # ══════════════════════════════════════════
-# APIFY — 6 peers reales
+# APIFY — señal de mercado general, NO referencia de precio
 # ══════════════════════════════════════════
 APIFY_CONFIG = {
     "ACTOR_ID": "voyager~booking-scraper",
@@ -382,11 +419,7 @@ APIFY_CONFIG = {
     ],
     "SCRAPE_ROTATION": {
         "enabled": True,
-        "MESES_POR_DIA": {
-            1: [1, 4],
-            3: [2, 5],
-            5: [3, 6],
-        },
+        "MESES_POR_DIA": {1: [1, 4], 3: [2, 5], 5: [3, 6]},
         "MAX_MESES_POR_EJECUCION": 2,
     },
     "SCRAPE_PROFILES": {
@@ -394,7 +427,7 @@ APIFY_CONFIG = {
         "SUMMER":  {"nights": 7, "adults": 4},
     },
     "SUMMER_MONTHS": [6, 7, 8, 9],
-    "MAX_WAIT_SECONDS": 120,
+    "MAX_WAIT_SECONDS": 180,
     "POLL_INTERVAL_MS": 5000,
 }
 
@@ -432,8 +465,3 @@ DEMAND_CURVE = {
     "MIN_OBS_PER_RANGE": 20,
     "CEILING_MULTIPLIER": 1.50,
 }
-
-# ══════════════════════════════════════════
-# MARKET INTELLIGENCE (AirROI)
-# ══════════════════════════════════════════
-MARKET_OCC = {}
