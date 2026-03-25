@@ -386,14 +386,18 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
         urls = get_all_peer_urls()
 
     cfg = APIFY_CONFIG
+    # Actor requires startUrls (not propertyUrls) for direct hotel page scraping.
+    # Each URL must be wrapped in {"url": ...} format.
+    # Do NOT include "search" — it causes the actor to return random results.
+    start_urls = [{"url": u} for u in urls]
     input_data = {
+        "startUrls": start_urls,
         "checkIn": check_in,
         "checkOut": check_out,
         "adults": adults,
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
-        "propertyUrls": urls,
     }
 
     try:
