@@ -1,9 +1,11 @@
 """
-OTB module — v7.3
-CHANGES from v7.2:
-  - calc_pace() now uses MULTI-YEAR weighted average (3 years)
-  - read_otb_by_type(): Returns OTB split by room type (upper vs ground)
-  - Snapshots in /data/ (Railway persistent volume) with /tmp fallback
+OTB module — v7.4
+CHANGES vs v7.2:
+  - calc_pace(): media ponderada de 3 años (2023/24/25), no solo LY
+    2025 fue año récord (+14%) — comparar solo contra él penaliza injustamente 2026
+    Pesos: 2023=0.20, 2024=0.35, 2025=0.45 (mismo que CURVE_WEIGHTS)
+  - fetch_historical_bookings(): ya usa HISTORICAL_YEARS=[2023,2024,2025] de config
+  - Sin cambios estructurales en el resto
 """
 
 import logging
@@ -34,19 +36,6 @@ def es_cancelada(b):
         return True
     ct = b.get("cancelTime", "")
     if ct and str(ct).strip() not in ("", "0000-00-00 00:00:00", "0000-00-00"):
-        return True
-    return False
-
-
-def es_activa(b):
-    if es_cancelada(b):
-        return False
-    s = b.get("status")
-    if s in (1, "1", 2, "2"):
-        return True
-    if isinstance(s, str) and s.lower() in ("confirmed", "new"):
-        return True
-    if s not in (3, "3", 4, "4", 5, "5"):
         return True
     return False
 
@@ -84,6 +73,7 @@ def parsear_reserva(b):
 # ══════════════════════════════════════════
 
 def read_otb():
+    """Read current OTB — units booked per date."""
     today = date.today()
     end = today + timedelta(days=config.PRICING_HORIZON)
 
@@ -137,6 +127,7 @@ def read_otb():
 
 
 def read_otb_by_type():
+    """Read OTB split by room type (upper/ground)."""
     today = date.today()
     end = today + timedelta(days=config.PRICING_HORIZON)
 
@@ -175,10 +166,7 @@ def read_otb_by_type():
         units = b.get("roomQty", 1) or 1
         room_id = b.get("roomId")
 
-        if room_id == config.ROOM_GROUND:
-            target = otb_ground
-        else:
-            target = otb_upper
+        target = otb_ground if room_id == config.ROOM_GROUND else otb_upper
 
         d = max(ci, today)
         while d < co:
@@ -189,7 +177,7 @@ def read_otb_by_type():
             target[k] = target.get(k, 0) + units
             d += timedelta(days=1)
 
-    log.info(f"  OTB by type: {len(otb_total)} fechas (upper: {sum(otb_upper.values())}, ground: {sum(otb_ground.values())} room-nights)")
+    log.info(f"  OTB by type: {len(otb_total)} fechas")
 
     try:
         save_otb_snapshot(otb_total)
@@ -200,7 +188,7 @@ def read_otb_by_type():
 
 
 # ══════════════════════════════════════════
-# OTB SNAPSHOT — Persistent storage
+# OTB SNAPSHOT
 # ══════════════════════════════════════════
 
 SNAPSHOT_DIR = "/data" if os.path.isdir("/data") else "/tmp"
@@ -211,10 +199,8 @@ def save_otb_snapshot(otb):
     today_str = fmt(date.today())
     snapshots = _load_snapshots()
     snapshots[today_str] = otb
-
     cutoff = fmt(date.today() - timedelta(days=14))
     snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
-
     with open(SNAPSHOT_FILE, "w") as f:
         json.dump(snapshots, f)
 
@@ -234,6 +220,7 @@ def _load_snapshots():
 # ══════════════════════════════════════════
 
 def calc_pickup(otb_actual):
+    """Pickup = OTB hoy - OTB hace 7 días."""
     pickup = {}
     snapshots = _load_snapshots()
     today = date.today()
@@ -260,6 +247,7 @@ def calc_pickup(otb_actual):
 # ══════════════════════════════════════════
 
 def fetch_historical_bookings(years=None):
+    """Fetch reservas históricas. Usa HISTORICAL_YEARS=[2023,2024,2025] por defecto."""
     if years is None:
         years = config.HISTORICAL_YEARS
 
@@ -315,6 +303,7 @@ def get_segment_key(d):
 
 
 def build_fill_curves(bookings):
+    """Fill curves ponderadas por año (CURVE_WEIGHTS)."""
     stays_by_seg = {}
     for b in bookings:
         ci = b["ci"]
@@ -325,9 +314,7 @@ def build_fill_curves(bookings):
         d = ci
         while d < co:
             seg_key = get_segment_key(d)
-            ant = (d - bd).days
-            if ant < 0:
-                ant = 0
+            ant = max(0, (d - bd).days)
             if seg_key not in stays_by_seg:
                 stays_by_seg[seg_key] = []
             stays_by_seg[seg_key].append({"ant": ant, "weight": w})
@@ -366,22 +353,31 @@ def get_expected_occ(fill_curves, seg_key, days_out):
 
 
 # ══════════════════════════════════════════
-# PACE — v7.3: MULTI-YEAR WEIGHTED AVERAGE
+# PACE — v7.4: media ponderada 3 años
+#
+# Antes: solo comparaba vs LY (2025).
+# Problema: 2025 fue año récord (+14%). Comparar 2026 solo vs 2025
+# penaliza fechas que van a ritmo normal de 2023/2024.
+#
+# Ahora: pace = media ponderada de OTB en el mismo punto de 2023, 2024 y 2025.
+# Pesos iguales a CURVE_WEIGHTS: 2023=0.20, 2024=0.35, 2025=0.45.
+# Si 2026 va por encima de la media ponderada → señal positiva (fPace > 1).
+# Si va por debajo → señal negativa (fPace < 1), pero no penaliza por estar
+# por debajo de solo el año excepcional.
 # ══════════════════════════════════════════
 
 def calc_pace(hist):
     """
-    v7.3: Pace uses WEIGHTED AVERAGE of all historical years.
-    Instead of only comparing vs LY (which might be anomalous),
-    we compare vs the weighted mean of 2023/2024/2025.
-    This gives a stable benchmark for booking velocity.
-
-    Returns: {date_str: weighted_avg_occ_at_this_lead_time}
+    Pace ponderado multi-año.
+    Para cada fecha futura, calcula el OTB normalizado que tenían
+    2023, 2024 y 2025 a la misma distancia temporal.
+    Devuelve la media ponderada como referencia.
     """
     pace = {}
     today = date.today()
+    weights = config.CURVE_WEIGHTS
 
-    # Group historical bookings by year
+    # Separar histórico por año
     hist_by_year = {}
     for b in hist:
         y = b["year"]
@@ -392,47 +388,57 @@ def calc_pace(hist):
     if not hist_by_year:
         return pace
 
+    total_weight = sum(weights.get(y, 0) for y in hist_by_year)
+    if total_weight <= 0:
+        return pace
+
     for di in range(config.PRICING_HORIZON):
         d = today + timedelta(days=di)
         date_str = fmt(d)
 
-        weighted_occ_sum = 0.0
-        weight_sum = 0.0
+        pace_ponderado = 0.0
+        peso_total = 0.0
 
-        for year, year_bks in hist_by_year.items():
-            w = config.CURVE_WEIGHTS.get(year, 0.33)
+        for year, bks in hist_by_year.items():
+            w = weights.get(year, 0)
+            if w <= 0:
+                continue
 
-            # Find equivalent date in historical year
+            # Fecha equivalente en ese año histórico
             try:
                 d_hist = d.replace(year=year)
             except ValueError:
-                # Feb 29 edge case
-                d_hist = d.replace(year=year, month=2, day=28)
+                # 29 feb en año no bisiesto
+                d_hist = d.replace(year=year, day=28)
 
-            # Deadline: how many bookings existed at the same lead time?
-            deadline = d_hist - timedelta(days=di)
+            # Punto equivalente en el tiempo: misma distancia a la fecha
+            deadline_hist = d_hist - timedelta(days=di)
 
-            # Count reservations for that date booked by the deadline
-            res = sum(
-                1 for b in year_bks
-                if b["ci"] <= d_hist < b["co"] and b["bd"] <= deadline
+            # OTB que tenía esa fecha en ese año en ese momento
+            reservas_hist = sum(
+                1 for b in bks
+                if b["ci"] <= d_hist < b["co"] and b["bd"] <= deadline_hist
             )
+            occ_hist = reservas_hist / config.TOTAL_UNITS
 
-            if res > 0:
-                occ = res / config.TOTAL_UNITS
-                weighted_occ_sum += occ * w
-                weight_sum += w
+            pace_ponderado += occ_hist * w
+            peso_total += w
 
-        if weight_sum > 0:
-            pace[date_str] = weighted_occ_sum / weight_sum
+        if peso_total > 0:
+            pace_ref = pace_ponderado / peso_total
+            if pace_ref > 0.02:  # Solo guardar si hay datos significativos
+                pace[date_str] = pace_ref
 
-    years_used = sorted(hist_by_year.keys())
-    log.info(f"  Pace v7.3: {len(pace)} fechas (media ponderada de {len(years_used)} años: {years_used})")
+    paces_con_datos = len(pace)
+    if paces_con_datos > 0:
+        log.info(f"  Pace multi-año: {paces_con_datos} fechas "
+                 f"(años: {sorted(hist_by_year.keys())}, pesos: {weights})")
+
     return pace
 
 
 # ══════════════════════════════════════════
-# CURRENT PRICES (sold prices for protection)
+# CURRENT PRICES (price protection)
 # ══════════════════════════════════════════
 
 def read_current_prices():
