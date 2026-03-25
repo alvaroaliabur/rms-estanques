@@ -247,8 +247,8 @@ def optimize(fecha, fc, otb):
             precio_base * cfg_opt["PESO_REAL"] + precio_forecast * cfg_opt["PESO_FORECAST"]
         )
 
-    # Unconstrained Demand Uplift
-    unc_uplift = get_unconstrained_uplift(seg, disponibles)
+    # Unconstrained Demand Uplift — only when there ARE real available units
+    unc_uplift = get_unconstrained_uplift(seg, disponibles_real)
     if unc_uplift > 1.0:
         precio_base = round(precio_base * unc_uplift)
 
