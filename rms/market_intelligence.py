@@ -1,6 +1,6 @@
 """
 AirROI — Market Intelligence for Colònia de Sant Jordi
-v7.1.1: Fixed field parsing, weekly execution, corrected API responses
+v7.2.1: Fixed _update_market_adr to NOT overwrite ADR_PEER
 
 Market-level data (not competitor-specific — that's Apify's job).
 AirROI tells us about the WHOLE MARKET. Apify tells us about our 8 competitors.
@@ -125,7 +125,6 @@ def get_comp_set():
 
         comp_metrics = []
         for l in listings:
-            # AirROI returns nested structure
             info = l.get("listing_info", {})
             perf = l.get("performance_metrics", {})
             loc = l.get("location_info", {})
@@ -162,7 +161,6 @@ def actualizar_market_intelligence():
 
     today = date.today()
 
-    # Cache: don't re-fetch same day
     if _cache_date == today and _cache:
         log.info("  Market intelligence cache vigente")
         return _cache
@@ -225,11 +223,11 @@ def _update_market_occ(occ_data):
 
 
 def _update_market_adr(adr_data):
-    \"\"\"Store market-wide ADR separately. Does NOT overwrite ADR_PEER.
+    """Store market-wide ADR separately. Does NOT overwrite ADR_PEER.
     
     ADR_PEER is for direct competitors (Apify scraping).
     MARKET_ADR is for the whole market (AirROI) — used as context only.
-    \"\"\"
+    """
     if not hasattr(config, 'MARKET_ADR'):
         config.MARKET_ADR = {}
     for entry in adr_data:
@@ -260,13 +258,11 @@ def check_and_update_market():
     global _cache
     today = date.today()
 
-    # Return cache if available (from this week's Wednesday run)
     if _cache:
         log.info("  Market intelligence cache vigente")
         return _cache
 
-    # Only fetch on Wednesdays
-    if today.weekday() != 2:  # Wednesday
+    if today.weekday() != 2:
         log.info("  AirROI: no es miércoles, usando datos existentes")
         return None
 
