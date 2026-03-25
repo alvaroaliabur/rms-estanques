@@ -206,7 +206,7 @@ SELF_NAMES = [
 
 APIFY_CONFIG = {
     "actor_id": "voyager~booking-scraper",
-    "max_wait_seconds": 300,  # 5 min — startUrls tarda ~3min en Apify
+    "max_wait_seconds": 180,  # Búsqueda genérica tarda ~2min
     "poll_interval_seconds": 5,
     "scrape_windows_days": [14, 30, 60],  # 3 ventanas: suficiente para comp set
     "profiles": {
@@ -266,32 +266,24 @@ def is_pricing_peer(name):
 
 def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
     """
-    Ejecuta scrape en Apify usando startUrls (URLs directas de hotel).
-    NO usa 'search' — eso devuelve búsqueda genérica de la zona.
-    Por defecto scrapea SOLO pricing peers.
-    Para market reference, pasar urls=get_all_urls().
+    Ejecuta scrape en Apify con búsqueda por destino + post-filtrado.
+    Usamos 'search' porque startUrls tarda 6+ min (demasiado lento).
+    Post-filtramos por is_pricing_peer para quedarnos solo con los peers.
     """
     if not apify_token:
         logger.warning("No Apify token")
         return []
 
-    if urls is None:
-        urls = get_all_peer_urls()
-
     cfg = APIFY_CONFIG
-
-    # Construir startUrls: cada URL de hotel como objeto {url: "..."}
-    start_urls = [{"url": u} for u in urls]
-
     input_data = {
-        "startUrls": start_urls,
+        "search": "Colònia de Sant Jordi",
         "checkIn": check_in,
         "checkOut": check_out,
         "adults": adults,
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
-        "maxItems": len(urls),
+        "maxItems": 30,  # Suficiente para capturar los 6 peers
     }
 
     try:
@@ -422,19 +414,16 @@ def scrape_comp_set(apify_token, windows_config=None):
 
         logger.info(f"  Scraping +{days_out}d ({ci_str}, {profile['nights']}n, {profile['adults']}a)...")
 
-        # Scrape con TODAS las URLs (peers + market ref)
-        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"], get_all_urls())
+        # Scrape por búsqueda genérica de zona, post-filtrado a pricing peers
+        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"])
 
         if results:
             # ADR de pricing peers (para ajuste de precio)
             adr_peers = calculate_comp_set_adr(results, peers_only=True)
-            # ADR de todo el market (para referencia)
-            adr_market = calculate_comp_set_adr(results, peers_only=False)
 
             n_peers = len([r for r in results if r["is_pricing_peer"] and r["price_per_night"] > 0])
-            n_total = len([r for r in results if r["price_per_night"] > 0])
 
-            logger.info(f"    +{days_out}d: ADR peers = {adr_peers}€ ({n_peers} peers) | ADR market = {adr_market}€ ({n_total} props)")
+            logger.info(f"    +{days_out}d: ADR peers = {adr_peers}€ ({n_peers} peers)")
 
             # Log detalle
             for r in sorted(results, key=lambda x: -x["price_per_night"]):
