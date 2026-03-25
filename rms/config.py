@@ -1,7 +1,13 @@
 """
 RMS Estanques — Configuration
 All pricing parameters, property details, and system settings.
-UPDATED: Real Capa A preciosPorDisp from Beds24 historical data.
+
+UPDATED: v7.2.1 — 25 marzo 2026
+- Techos calibrados con datos reales (max vendido 468€, no fantasía de 700€)
+- Floors subidos para proteger últimas unidades en verano
+- preciosPorDisp julio/agosto importados de GAS CAPA_A_OVERRIDE_UA (probados en producción)
+- Comp set reducido a 6 peers reales (<1.5km)
+- RECORDAR: precios en Beds24, Genius descuenta 15% al huésped
 """
 
 import os
@@ -10,7 +16,6 @@ from datetime import datetime
 # ══════════════════════════════════════════
 # PROPERTY
 # ══════════════════════════════════════════
-
 PROPERTY_ID = 119628
 ROOM_UPPER = 269521
 ROOM_GROUND = 269520
@@ -23,7 +28,6 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 # ══════════════════════════════════════════
 # CREDENTIALS (from environment variables)
 # ══════════════════════════════════════════
-
 BEDS24_REFRESH_TOKEN = os.getenv("BEDS24_REFRESH_TOKEN", "")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 SMTP_USER = os.getenv("SMTP_USER", ALERT_EMAIL)
@@ -33,7 +37,6 @@ SHEET_ID = os.getenv("SHEET_ID", "1aL5--wWdHiQV_G30YcbLKzt4stoPI_Ma24Me1QSTcEc")
 # ══════════════════════════════════════════
 # PRICING HORIZON
 # ══════════════════════════════════════════
-
 PRICING_HORIZON = 365
 HISTORICAL_YEARS = [datetime.now().year - 1]
 CURVE_WEIGHTS = {datetime.now().year - 1: 1.0}
@@ -41,7 +44,6 @@ CURVE_WEIGHTS = {datetime.now().year - 1: 1.0}
 # ══════════════════════════════════════════
 # SEASONS
 # ══════════════════════════════════════════
-
 SEASON_CODE = {
     1: "B", 2: "B", 3: "MB", 4: "M", 5: "MA", 6: "A",
     7: "UA", 8: "UA", 9: "A", 10: "MA", 11: "B", 12: "MB",
@@ -50,56 +52,66 @@ SEASON_CODE = {
 # ══════════════════════════════════════════
 # SEGMENT BASE — Real Capa A from production
 # preciosPorDisp: {1: price_1_free, ..., 9: price_9_free}
+#
+# NOTA: Estos precios van a Beds24. El huésped Genius ve ~85% de esto.
+# Ejemplo: disp=1 agosto WD = 420€ en Beds24 → Genius paga 357€
+#
+# v7.2.1: julio y agosto recalibrados con datos de GAS CAPA_A_OVERRIDE_UA
+# que generaron el revenue real de 2025. Techos bajados a valores realistas.
 # ══════════════════════════════════════════
-
 SEGMENT_BASE = {
-    "1-WD": {"code": "B", "base": 40, "suelo": 35, "techo": 105,
+    "1-WD": {"code": "B",  "base": 40,  "suelo": 35,  "techo": 105,
              "preciosPorDisp": {1: 70, 2: 60, 3: 40, 4: 40, 5: 40, 6: 40, 7: 40, 8: 40, 9: 40}},
-    "1-WE": {"code": "B", "base": 40, "suelo": 35, "techo": 120,
+    "1-WE": {"code": "B",  "base": 40,  "suelo": 35,  "techo": 120,
              "preciosPorDisp": {1: 80, 2: 60, 3: 60, 4: 40, 5: 40, 6: 40, 7: 40, 8: 40, 9: 40}},
-    "2-WD": {"code": "B", "base": 60, "suelo": 48, "techo": 150,
+    "2-WD": {"code": "B",  "base": 60,  "suelo": 48,  "techo": 150,
              "preciosPorDisp": {1: 100, 2: 80, 3: 80, 4: 70, 5: 70, 6: 60, 7: 60, 8: 60, 9: 60}},
-    "2-WE": {"code": "B", "base": 60, "suelo": 48, "techo": 165,
+    "2-WE": {"code": "B",  "base": 60,  "suelo": 48,  "techo": 165,
              "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 70, 6: 60, 7: 60, 8: 60, 9: 60}},
-    "3-WD": {"code": "MB", "base": 70, "suelo": 56, "techo": 165,
+    "3-WD": {"code": "MB", "base": 70,  "suelo": 56,  "techo": 165,
              "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 80, 6: 70, 7: 70, 8: 70, 9: 70}},
-    "3-WE": {"code": "MB", "base": 70, "suelo": 56, "techo": 180,
+    "3-WE": {"code": "MB", "base": 70,  "suelo": 56,  "techo": 180,
              "preciosPorDisp": {1: 120, 2: 90, 3: 80, 4: 80, 5: 70, 6: 70, 7: 70, 8: 70, 9: 70}},
-    "4-WD": {"code": "M", "base": 100, "suelo": 80, "techo": 195,
+    "4-WD": {"code": "M",  "base": 100, "suelo": 80,  "techo": 195,
              "preciosPorDisp": {1: 130, 2: 120, 3: 120, 4: 110, 5: 110, 6: 110, 7: 100, 8: 100, 9: 100}},
-    "4-WE": {"code": "M", "base": 100, "suelo": 80, "techo": 210,
+    "4-WE": {"code": "M",  "base": 100, "suelo": 80,  "techo": 210,
              "preciosPorDisp": {1: 140, 2: 130, 3: 120, 4: 120, 5: 110, 6: 110, 7: 100, 8: 100, 9: 100}},
-    "5-WD": {"code": "MA", "base": 110, "suelo": 88, "techo": 240,
+    "5-WD": {"code": "MA", "base": 110, "suelo": 88,  "techo": 240,
              "preciosPorDisp": {1: 160, 2: 140, 3: 130, 4: 130, 5: 120, 6: 110, 7: 110, 8: 110, 9: 110}},
-    "5-WE": {"code": "MA", "base": 120, "suelo": 88, "techo": 240,
+    "5-WE": {"code": "MA", "base": 120, "suelo": 88,  "techo": 240,
              "preciosPorDisp": {1: 160, 2: 160, 3: 140, 4: 130, 5: 130, 6: 120, 7: 110, 8: 110, 9: 110}},
-    "6-WD": {"code": "A", "base": 170, "suelo": 112, "techo": 345,
+    "6-WD": {"code": "A",  "base": 170, "suelo": 112, "techo": 345,
              "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 170, 6: 170, 7: 160, 8: 140, 9: 140}},
-    "6-WE": {"code": "A", "base": 170, "suelo": 128, "techo": 360,
+    "6-WE": {"code": "A",  "base": 170, "suelo": 128, "techo": 360,
              "preciosPorDisp": {1: 240, 2: 210, 3: 200, 4: 190, 5: 180, 6: 170, 7: 170, 8: 160, 9: 160}},
-    "7-WD": {"code": "UA", "base": 260, "suelo": 168, "techo": 495,
-             "preciosPorDisp": {1: 330, 2: 310, 3: 290, 4: 280, 5: 260, 6: 250, 7: 230, 8: 230, 9: 210}},
-    "7-WE": {"code": "UA", "base": 260, "suelo": 168, "techo": 480,
-             "preciosPorDisp": {1: 320, 2: 310, 3: 290, 4: 280, 5: 260, 6: 250, 7: 230, 8: 210, 9: 210}},
-    "8-WD": {"code": "UA", "base": 300, "suelo": 208, "techo": 615,
-             "preciosPorDisp": {1: 410, 2: 370, 3: 350, 4: 310, 5: 300, 6: 290, 7: 270, 8: 260, 9: 260}},
-    "8-WE": {"code": "UA", "base": 300, "suelo": 208, "techo": 570,
-             "preciosPorDisp": {1: 380, 2: 350, 3: 350, 4: 310, 5: 300, 6: 280, 7: 270, 8: 260, 9: 260}},
-    "9-WD": {"code": "A", "base": 180, "suelo": 136, "techo": 345,
+    # ── JULIO v7.2.1: importado de GAS CAPA_A_OVERRIDE_UA ──
+    # disp=1 WD 400€ → Genius 340€ | disp=1 WE 420€ → Genius 357€
+    "7-WD": {"code": "UA", "base": 260, "suelo": 168, "techo": 520,
+             "preciosPorDisp": {1: 400, 2: 355, 3: 325, 4: 305, 5: 290, 6: 280, 7: 275, 8: 270, 9: 265}},
+    "7-WE": {"code": "UA", "base": 260, "suelo": 168, "techo": 520,
+             "preciosPorDisp": {1: 420, 2: 375, 3: 340, 4: 320, 5: 305, 6: 295, 7: 285, 8: 280, 9: 275}},
+    # ── AGOSTO v7.2.1: importado de GAS CAPA_A_OVERRIDE_UA ──
+    # disp=1 WD 440€ → Genius 374€ | disp=1 WE 460€ → Genius 391€
+    # Max real vendido ago 2025 = 468€ (Genius 398€)
+    "8-WD": {"code": "UA", "base": 300, "suelo": 208, "techo": 540,
+             "preciosPorDisp": {1: 440, 2: 395, 3: 360, 4: 335, 5: 320, 6: 310, 7: 300, 8: 295, 9: 290}},
+    "8-WE": {"code": "UA", "base": 300, "suelo": 208, "techo": 540,
+             "preciosPorDisp": {1: 460, 2: 415, 3: 380, 4: 355, 5: 340, 6: 325, 7: 315, 8: 305, 9: 300}},
+    "9-WD": {"code": "A",  "base": 180, "suelo": 136, "techo": 345,
              "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 180, 6: 180, 7: 170, 8: 170, 9: 170}},
-    "9-WE": {"code": "A", "base": 180, "suelo": 136, "techo": 345,
+    "9-WE": {"code": "A",  "base": 180, "suelo": 136, "techo": 345,
              "preciosPorDisp": {1: 230, 2: 210, 3: 200, 4: 190, 5: 190, 6: 180, 7: 180, 8: 170, 9: 170}},
-    "10-WD": {"code": "MA", "base": 120, "suelo": 96, "techo": 255,
+    "10-WD": {"code": "MA", "base": 120, "suelo": 96,  "techo": 255,
               "preciosPorDisp": {1: 170, 2: 160, 3: 140, 4: 140, 5: 140, 6: 130, 7: 120, 8: 120, 9: 120}},
-    "10-WE": {"code": "MA", "base": 120, "suelo": 96, "techo": 255,
+    "10-WE": {"code": "MA", "base": 120, "suelo": 96,  "techo": 255,
               "preciosPorDisp": {1: 170, 2: 160, 3: 150, 4: 140, 5: 140, 6: 130, 7: 120, 8: 120, 9: 120}},
-    "11-WD": {"code": "B", "base": 70, "suelo": 56, "techo": 150,
+    "11-WD": {"code": "B",  "base": 70,  "suelo": 56,  "techo": 150,
               "preciosPorDisp": {1: 100, 2: 100, 3: 90, 4: 80, 5: 80, 6: 70, 7: 70, 8: 70, 9: 70}},
-    "11-WE": {"code": "B", "base": 70, "suelo": 56, "techo": 165,
+    "11-WE": {"code": "B",  "base": 70,  "suelo": 56,  "techo": 165,
               "preciosPorDisp": {1: 110, 2: 100, 3: 90, 4: 80, 5: 80, 6: 80, 7: 70, 8: 70, 9: 70}},
-    "12-WD": {"code": "MB", "base": 120, "suelo": 96, "techo": 225,
+    "12-WD": {"code": "MB", "base": 120, "suelo": 96,  "techo": 225,
               "preciosPorDisp": {1: 150, 2: 120, 3: 120, 4: 120, 5: 120, 6: 120, 7: 120, 8: 120, 9: 120}},
-    "12-WE": {"code": "MB", "base": 120, "suelo": 96, "techo": 225,
+    "12-WE": {"code": "MB", "base": 120, "suelo": 96,  "techo": 225,
               "preciosPorDisp": {1: 150, 2: 140, 3: 120, 4: 120, 5: 120, 6: 120, 7: 120, 8: 120, 9: 120}},
 }
 
@@ -108,31 +120,29 @@ CHECKPOINTS = [120, 105, 90, 75, 60, 45, 30, 21, 14, 10, 7, 3, 0]
 # ══════════════════════════════════════════
 # PRICE SLOTS (Beds24 calendar fields)
 # ══════════════════════════════════════════
-
 PRICE_SLOTS = {
     "STANDARD": "price1",
     "6NOCHES": "price3",
     "5NOCHES": "price4",
     "4NOCHES": "price5",
-    "SEMANAL": "price10",
+    "SEMANAL":  "price10",
 }
 
 # ══════════════════════════════════════════
 # DURATION DISCOUNTS
 # ══════════════════════════════════════════
-
 DURATION_DISCOUNTS_DYNAMIC = {
     "4NOCHES": {"base": 0.82, "min": 0.90},
     "5NOCHES": {"base": 0.75, "min": 0.85},
     "6NOCHES": {"base": 0.68, "min": 0.80},
-    "SEMANAL": {"base": 0.60, "min": 0.75},
+    "SEMANAL":  {"base": 0.60, "min": 0.75},
 }
 
 DURATION_FLOOR_FACTOR = {
     "4NOCHES": 0.92,
     "5NOCHES": 0.85,
     "6NOCHES": 0.78,
-    "SEMANAL": 0.70,
+    "SEMANAL":  0.70,
 }
 
 DURATION_DISCOUNT_OCC_LOW = 0.30
@@ -144,20 +154,24 @@ DURATION_DISCOUNTS = {
 
 # ══════════════════════════════════════════
 # FLOORS & CEILINGS
+# Todos los precios = lo que va a Beds24
+# Genius = precio * 0.85 (lo que ve el huésped)
 # ══════════════════════════════════════════
-
 SEASONAL_FLOOR = {
     "B": 75, "MB": 90, "M": 140, "MA": 165, "A": 235, "UA": 395,
 }
 
+# v7.2.1: julio 320→390 (Genius 332€), agosto 367→440 (Genius 374€)
 MONTHLY_FLOOR = {
     1: 60, 2: 65, 3: 95, 4: 130, 5: 170, 6: 260,
-    7: 320, 8: 367, 9: 280, 10: 175, 11: 70, 12: 85,
+    7: 390, 8: 440, 9: 280, 10: 175, 11: 70, 12: 85,
 }
 
+# v7.2.1: julio 650→520 (Genius 442€), agosto 700→540 (Genius 459€)
+# Max real vendido = 468€ en Beds24 (Genius 398€). Techo da ~15% margen.
 MONTHLY_CEILING = {
     1: 180, 2: 180, 3: 200, 4: 310, 5: 360, 6: 500,
-    7: 650, 8: 700, 9: 500, 10: 380, 11: 180, 12: 250,
+    7: 520, 8: 540, 9: 500, 10: 380, 11: 180, 12: 250,
 }
 
 CEILING_BY_SEASON = {
@@ -171,7 +185,6 @@ WEEKEND_FLOOR_PREMIUM = {
 # ══════════════════════════════════════════
 # PRICE PROTECTION
 # ══════════════════════════════════════════
-
 PRICE_PROTECTION_BY_DAYS = {60: 0.95, 30: 0.85, 14: 0.75, 7: 0.60, 0: 0.00}
 
 MIN_BOOKING_REVENUE = {
@@ -180,14 +193,14 @@ MIN_BOOKING_REVENUE = {
 
 # ══════════════════════════════════════════
 # GENIUS COMPENSATION
+# precio_publicado = precio_neto * 1.18
+# Para que tras -15% Genius, revenue ≈ precio_neto
 # ══════════════════════════════════════════
-
 GENIUS_COMPENSATION = 1.18
 
 # ══════════════════════════════════════════
 # MIN STAY
 # ══════════════════════════════════════════
-
 DEFAULT_MIN_STAY = {"B": 3, "MB": 3, "M": 3, "MA": 4, "A": 5, "UA": 7}
 
 MIN_STAY_REDUCTION = {
@@ -209,7 +222,6 @@ MIN_STAY_DYNAMIC = {
 # ══════════════════════════════════════════
 # LOS DINÁMICO
 # ══════════════════════════════════════════
-
 LOS_DINAMICO = {
     "enabled": True,
     "ABSOLUTE_MIN": {"UA": 3, "A": 3, "MA": 3, "M": 3, "MB": 3, "B": 3},
@@ -237,7 +249,6 @@ LOS_DINAMICO = {
 # ══════════════════════════════════════════
 # LAST MINUTE WINTER
 # ══════════════════════════════════════════
-
 LAST_MINUTE_WINTER = {
     "enabled": True,
     "seasons": ["B", "MB"],
@@ -256,7 +267,6 @@ LAST_MINUTE_WINTER = {
 # ══════════════════════════════════════════
 # COMP SET
 # ══════════════════════════════════════════
-
 COMP_SET = {
     "enabled": True,
     "ADR_PEER": {
@@ -271,7 +281,6 @@ COMP_SET = {
 # ══════════════════════════════════════════
 # GROUND FLOOR
 # ══════════════════════════════════════════
-
 GROUND_FLOOR_LOS = {
     "enabled": True,
     "absolute_min": 2,
@@ -282,18 +291,18 @@ GROUND_FLOOR_LOS = {
 # ══════════════════════════════════════════
 # EVENTS CONFIG
 # ══════════════════════════════════════════
-
 EVENTS_OVERLAP_RULE = "MAX"
 
 # ══════════════════════════════════════════
 # V7 ENGINE CONFIG
 # ══════════════════════════════════════════
-
 V7 = {
+    # v7.2.1: julio 320→360, agosto 367→400 (coherente con MONTHLY_FLOOR)
     "MONTHLY_FLOOR_V7": {
         1: 78, 2: 89, 3: 94, 4: 134, 5: 154, 6: 218,
-        7: 320, 8: 367, 9: 222, 10: 161, 11: 94, 12: 148,
+        7: 390, 8: 440, 9: 222, 10: 161, 11: 94, 12: 148,
     },
+
     "FORECAST": {
         "PACE_SENS": 0.30,
         "PACE_MIN": 0.80,
@@ -308,13 +317,16 @@ V7 = {
         "TRENDS_MIN": 0.95,
         "TRENDS_MAX": 1.10,
     },
+
     "OPTIM": {
         "PESO_REAL": 0.70,
         "PESO_FORECAST": 0.30,
     },
+
     "SUAVIZADO": {
         "MAX_VARIACION_DIARIA": 0.12,
     },
+
     "COMP_SET_ADJ": {
         "RATIO_ALTO": 1.40,
         "FACTOR_ALTO": 0.95,
@@ -326,7 +338,6 @@ V7 = {
 # ══════════════════════════════════════════
 # ALERTAS
 # ══════════════════════════════════════════
-
 ALERTAS_ANOMALIAS = {
     "enabled": True,
     "GAP_URGENTE": {
@@ -353,9 +364,8 @@ ALERTAS_ANOMALIAS = {
 }
 
 # ══════════════════════════════════════════
-# APIFY
+# APIFY — v7.2.1: reducido a 6 peers reales
 # ══════════════════════════════════════════
-
 APIFY_CONFIG = {
     "ACTOR_ID": "voyager~booking-scraper",
     "COMP_SET_URLS": [
@@ -365,8 +375,6 @@ APIFY_CONFIG = {
         "https://www.booking.com/hotel/es/blue-house-mallorca.es.html",
         "https://www.booking.com/hotel/es/apartamentos-ibiza-colonia-de-sant-jordi1.es.html",
         "https://www.booking.com/hotel/es/villa-piccola-by-cassai.es.html",
-        "https://www.booking.com/hotel/es/apartamentos-cala-figuera-cala-figuera.es.html",
-        "https://www.booking.com/hotel/es/carrer-de-l-esglesia-1.es.html",
     ],
     "SCRAPE_ROTATION": {
         "enabled": True,
@@ -379,7 +387,7 @@ APIFY_CONFIG = {
     },
     "SCRAPE_PROFILES": {
         "DEFAULT": {"nights": 3, "adults": 2},
-        "SUMMER": {"nights": 7, "adults": 4},
+        "SUMMER":  {"nights": 7, "adults": 4},
     },
     "SUMMER_MONTHS": [6, 7, 8, 9],
     "MAX_WAIT_SECONDS": 120,
@@ -389,7 +397,6 @@ APIFY_CONFIG = {
 # ══════════════════════════════════════════
 # VACACIONES ESCOLARES
 # ══════════════════════════════════════════
-
 CAPA_EVENTOS = {
     "enabled": True,
     "MERCADOS": [
@@ -407,7 +414,6 @@ CAPA_EVENTOS = {
 # ══════════════════════════════════════════
 # MONTHLY ALERTS
 # ══════════════════════════════════════════
-
 MONTHLY_ALERTS = {
     "enabled": True,
     "threshold_warning": -0.10,
@@ -417,7 +423,6 @@ MONTHLY_ALERTS = {
 # ══════════════════════════════════════════
 # DEMAND CURVE (Capa A)
 # ══════════════════════════════════════════
-
 DEMAND_CURVE = {
     "PRICE_STEP": 10,
     "MIN_OBS_PER_RANGE": 20,
