@@ -224,7 +224,8 @@ def optimize(fecha, fc, otb):
         })
 
     reservadas = otb.get(date_str, 0)
-    disponibles = max(1, min(config.TOTAL_UNITS, config.TOTAL_UNITS - reservadas))
+    disponibles_real = max(0, min(config.TOTAL_UNITS, config.TOTAL_UNITS - reservadas))
+    disponibles = max(1, disponibles_real)  # For pricing calc (avoid div/0)
 
     # Price from Capa A by availability
     ppd = pricing.get("preciosPorDisp")
@@ -257,7 +258,8 @@ def optimize(fecha, fc, otb):
 
     return {
         "precioNeto": precio_base,
-        "disponibles": disponibles,
+        "disponibles": disponibles_real,  # Real: 0 when full
+        "disponiblesCalc": disponibles,    # For pricing: min 1
         "reservadas": reservadas,
         "dispVirtual": disp_virtual,
         "ajusteCompSet": ajuste_cs,
@@ -290,7 +292,8 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
     days_out = fc["daysOut"]
     event_info = fc["eventInfo"]
     reservadas = otb.get(date_str, 0)
-    disponibles = max(1, config.TOTAL_UNITS - reservadas)
+    disponibles_real = max(0, config.TOTAL_UNITS - reservadas)
+    disponibles = max(1, disponibles_real)  # For calc
     occ_now = reservadas / config.TOTAL_UNITS
 
     # 1. Floor & ceiling
