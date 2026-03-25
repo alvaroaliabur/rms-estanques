@@ -211,7 +211,7 @@ SELF_NAMES = [
 
 APIFY_CONFIG = {
     "actor_id": "voyager~booking-scraper",
-    "max_wait_seconds": 180,  # Subido de 120 a 180 para ventanas lejanas
+    "max_wait_seconds": 120,  # 120s same as GAS original
     "poll_interval_seconds": 5,
     "scrape_windows_days": [7, 14, 30, 60, 90],
     "profiles": {
@@ -386,18 +386,25 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
         urls = get_all_peer_urls()
 
     cfg = APIFY_CONFIG
-    # Actor requires startUrls (not propertyUrls) for direct hotel page scraping.
-    # Each URL must be wrapped in {"url": ...} format.
-    # Do NOT include "search" — it causes the actor to return random results.
-    start_urls = [{"url": u} for u in urls]
+    # Actor voyager/booking-scraper has two modes:
+    #   1. "search" = destination search (what GAS always used)
+    #   2. "startUrls" = direct hotel URLs
+    #
+    # GAS used search + ignored "propertyUrls" (not a real field).
+    # The actor returned ~10 results from the area and GAS filtered
+    # peers in post-processing. We do the same here.
+    #
+    # The `urls` parameter is NOT passed to the actor — it's only used
+    # for post-filtering in calculate_comp_set_adr(peers_only=True).
     input_data = {
-        "startUrls": start_urls,
+        "search": "Colònia de Sant Jordi",
         "checkIn": check_in,
         "checkOut": check_out,
         "adults": adults,
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
+        "maxItems": 15,
     }
 
     try:
@@ -528,8 +535,9 @@ def scrape_comp_set(apify_token, windows_config=None):
 
         logger.info(f"  Scraping +{days_out}d ({ci_str}, {profile['nights']}n, {profile['adults']}a)...")
 
-        # Scrape con TODAS las URLs (peers + market ref)
-        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"], get_all_urls())
+        # Scrape SOLO pricing peers (6 URLs) — rápido y es lo que ajusta precio.
+        # Market reference (19 URLs) se puede scrapear en run semanal separado.
+        results = run_apify_scrape(apify_token, ci_str, co_str, profile["adults"], get_all_peer_urls())
 
         if results:
             # ADR de pricing peers (para ajuste de precio)
