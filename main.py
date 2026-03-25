@@ -1,17 +1,18 @@
 """
-RMS Estanques v7.2.2 — Python/Railway Edition
+RMS Estanques v7.3 — Python/Railway Edition
 Main entry point — Flask server + APScheduler + webhook handler
 
-v7.2.2 CHANGES:
-  - Added threading lock to prevent concurrent run_full() executions
-  - Webhook now returns 429 if a run is already in progress
-  - Fixed: comp_updated handling (check_and_update_comp_set returns dict or None)
+v7.3 CHANGES:
+  - Direct price multipliers (fOTB, fPickup, fPace, fTotal)
+  - Multi-year historical data (3 years for fill curves)
+  - Revenue audit: compares vs BEST historical year
+  - /prices/compare shows multiplier columns
+  - /explicacion shows revenue audit dashboard
 """
 
 import os
 import sys
 import logging
-import threading
 from datetime import datetime, date
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -29,34 +30,18 @@ app = Flask(__name__)
 _last_results = []
 _last_audit = {}
 _last_claude = {}
-
-# ══════════════════════════════════════════
-# LOCK — Prevent concurrent pricing runs
-# ══════════════════════════════════════════
-_run_lock = threading.Lock()
 _run_in_progress = False
 
 
 def run_full():
-    """Full daily pricing pipeline. Thread-safe with lock."""
+    """Full daily pricing pipeline."""
     global _last_results, _last_audit, _last_claude, _run_in_progress
 
-    # Non-blocking check: if already running, skip
-    if not _run_lock.acquire(blocking=False):
-        log.warning("⚠️ run_full() already in progress — skipping this trigger")
-        return {"status": "skipped", "reason": "run_already_in_progress"}
+    if _run_in_progress:
+        log.warning("Run already in progress, skipping")
+        return
 
     _run_in_progress = True
-    try:
-        return _run_full_inner()
-    finally:
-        _run_in_progress = False
-        _run_lock.release()
-
-
-def _run_full_inner():
-    """Actual pricing logic — only called when lock is held."""
-    global _last_results, _last_audit, _last_claude
 
     from rms import config
     from rms.beds24 import get_token
@@ -73,7 +58,7 @@ def _run_full_inner():
 
     start = datetime.now()
     log.info("══════════════════════════════════════════")
-    log.info("  RMS ESTANQUES v7.2.2 — Full Pricing Run")
+    log.info("  RMS ESTANQUES v7.3 — Full Pricing Run")
     log.info(f"  {start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("══════════════════════════════════════════")
 
@@ -86,7 +71,7 @@ def _run_full_inner():
             return
         log.info("  ✅ Beds24 conectado")
 
-        # Step 2: Capa A check (quarterly rebuild)
+        # Step 2: Capa A check
         log.info("\n── STEP 2: Capa A ──")
         recalibrated = check_and_recalibrate()
         if recalibrated:
@@ -94,16 +79,15 @@ def _run_full_inner():
         else:
             cargar_capa_a()
 
-        # Step 3: Comp Set check (weekly, with freshness cache)
+        # Step 3: Comp Set check
         log.info("\n── STEP 3: Comp Set ──")
         comp_updated = check_and_update_comp_set()
         if comp_updated:
-            n_windows = len(comp_updated.get("by_window", {}))
-            log.info(f"  ✅ Comp Set actualizado ({n_windows} ventanas)")
+            log.info(f"  ✅ Comp Set actualizado ({len(comp_updated)} ventanas)")
         else:
-            log.info("  Comp Set cache vigente — usando datos existentes")
+            log.info("  Usando ADR_PEER existente")
 
-        # Step 4: Vacaciones check (monthly)
+        # Step 4: Vacaciones check
         log.info("\n── STEP 4: Vacaciones escolares ──")
         vac_updated = check_and_update_vacaciones()
         if vac_updated:
@@ -111,7 +95,7 @@ def _run_full_inner():
         else:
             log.info("  Cache de vacaciones vigente")
 
-        # Step 4b: Market Intelligence (AirROI)
+        # Step 4b: Market Intelligence
         log.info("\n── STEP 4b: Market Intelligence ──")
         try:
             from rms.market_intelligence import check_and_update_market
@@ -123,15 +107,15 @@ def _run_full_inner():
         except Exception as e:
             log.warning(f"  Market intelligence error: {e}")
 
-        # Step 5: Load data — NOW WITH PER-TYPE OTB
+        # Step 5: Load data
         log.info("\n── STEP 5: Cargar datos ──")
         otb, otb_by_type = read_otb_by_type()
         log.info(f"  ✅ OTB: {len(otb)} fechas (per-type loaded)")
         events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
 
-        # Step 6: Calculate prices v7.2 — WITH otb_by_type
-        log.info("\n── STEP 6: Calcular precios v7.2 ──")
+        # Step 6: Calculate prices v7.3
+        log.info("\n── STEP 6: Calcular precios v7.3 ──")
         results = calcular_precios_v7(otb, events, otb_by_type=otb_by_type)
         log.info(f"  ✅ {len(results)} días calculados")
 
@@ -191,17 +175,15 @@ def _run_full_inner():
         _last_claude = claude_result
 
         elapsed = (datetime.now() - start).total_seconds()
-        log.info(f"\n✅ RMS v7.2.2 completado en {elapsed:.1f}s")
-
-        return {"status": "ok", "days": len(results), "elapsed": elapsed}
+        log.info(f"\n✅ RMS v7.3 completado en {elapsed:.1f}s")
 
     except Exception as e:
         log.error(f"❌ Error fatal: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+    finally:
+        _run_in_progress = False
 
 
 def audit_results(results):
-    """Audit pricing results for sanity."""
     alertas = []
     warnings = []
     ok = True
@@ -245,6 +227,11 @@ def audit_results(results):
         if dias_techo > 20:
             warnings.append(f"{dias_techo} días limitados por TECHO")
 
+        # v7.3: warn if multipliers aren't working
+        mult_active = sum(1 for r in results if abs(r.get("fTotal", 1.0) - 1.0) > 0.02)
+        if mult_active < 10:
+            warnings.append(f"Solo {mult_active} días con multiplicadores activos — revisar señales")
+
     return {"ok": ok, "alertas": alertas, "warnings": warnings}
 
 
@@ -255,21 +242,12 @@ def audit_results(results):
 @app.route("/webhook/booking", methods=["POST"])
 def webhook_booking():
     log.info("📨 Webhook recibido: booking event")
-
-    if _run_in_progress:
-        log.info("  ⏳ Run in progress — webhook queued as skip")
-        return jsonify({
-            "status": "skipped",
-            "reason": "pricing_run_in_progress",
-            "message": "Another run is active. Prices will reflect this booking on next run."
-        }), 429
-
     try:
         data = request.get_json(silent=True) or {}
         booking_id = data.get("bookingId") or data.get("id") or "unknown"
         log.info(f"  Booking ID: {booking_id}")
-        result = run_full()
-        return jsonify({"status": "ok", "action": "repricing_triggered", "result": result})
+        run_full()
+        return jsonify({"status": "ok", "action": "repricing_triggered"})
     except Exception as e:
         log.error(f"  Webhook error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -285,7 +263,7 @@ def health():
     next_run = str(scheduler_job.next_run_time) if scheduler_job else "not scheduled"
     return jsonify({
         "status": "ok",
-        "service": "RMS Estanques v7.2.2",
+        "service": "RMS Estanques v7.3",
         "next_run": next_run,
         "run_in_progress": _run_in_progress,
     })
@@ -293,38 +271,40 @@ def health():
 
 @app.route("/run")
 def trigger_run():
-    if _run_in_progress:
-        return jsonify({"status": "busy", "message": "Run already in progress"}), 429
-    result = run_full()
+    run_full()
     return jsonify({
         "status": "ok",
         "results": len(_last_results),
         "audit": _last_audit,
-        "run_result": result,
     })
 
 
 @app.route("/prices/compare")
 def prices_compare():
+    """v7.3: Shows multiplier columns for full transparency."""
     if not _last_results:
         return "No results yet. Hit /run first.", 404
 
     lines = []
-    header = f"{'Fecha':<11}| {'Disp':>4} | {'Precio PY':>10} | {'Genius':>7} | {'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | {'DispV':>5} | {'Fcst':>4} | {'Clamp':>5} | {'MinSt':>5} | {'MnGnd':>5} | {'Vac':>4} | {'Mkt':>4}"
+    header = (f"{'Fecha':<11}| {'Disp':>4} | {'Precio':>6} | {'Genius':>6} | "
+              f"{'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | "
+              f"{'fOTB':>5} | {'fPick':>5} | {'fPace':>5} | {'fTot':>5} | "
+              f"{'Urg':>4} | {'EBSA':>5} | {'Boost':>5} | "
+              f"{'Clamp':>5} | {'MinSt':>5} | {'Vac':>4}")
     lines.append(header)
     lines.append("-" * len(header))
 
     for r in _last_results:
         month = int(r["date"][5:7])
-        if month < 7 or month > 8:
-            continue
-        if r["date"] > "2026-08-15":
+        if month < 4 or month > 10:
             continue
 
         lines.append(
-            f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>7}€ | {r['precioGenius']:>5}€ | {r.get('suelo',''):>5} | {r.get('techo',''):>5} | "
-            f"{r.get('precioNeto',''):>5} | {r.get('dispVirtual',''):>5} | {r.get('forecastDemanda',''):>4} | {r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | "
-            f"{r.get('minStayGround',''):>5} | {r.get('vacFactor',1.0):>4} | {r.get('marketFactor',1.0):>4}"
+            f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>4}€ | {r['precioGenius']:>4}€ | "
+            f"{r.get('suelo',''):>5} | {r.get('techo',''):>5} | {r.get('precioNeto',''):>5} | "
+            f"{r.get('fOTB',1.0):>5.2f} | {r.get('fPickup',1.0):>5.2f} | {r.get('fPace',1.0):>5.2f} | {r.get('fTotal',1.0):>5.2f} | "
+            f"{r.get('urgency',1.0):>4.1f} | {r.get('fEBSA',1.0):>5.2f} | {r.get('boostUA',1.0):>5.2f} | "
+            f"{r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | {r.get('vacFactor',1.0):>4.2f}"
         )
 
     return "<pre>" + "\n".join(lines) + "</pre>"
@@ -351,7 +331,7 @@ def email_view():
 
 @app.route("/explicacion")
 def explicacion():
-    """Human-readable explanation of all 365 prices."""
+    """Human-readable explanation of all prices + revenue audit."""
     if not _last_results:
         return "<h1>No hay datos. Ejecuta <a href='/run'>/run</a> primero.</h1>", 404
     from rms.explicacion import generar_explicacion_html
