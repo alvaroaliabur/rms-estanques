@@ -1,10 +1,9 @@
 """
-OTB module — v7.2
-CHANGES:
+OTB module — v7.3
+CHANGES from v7.2:
+  - calc_pace() now uses MULTI-YEAR weighted average (3 years)
   - read_otb_by_type(): Returns OTB split by room type (upper vs ground)
-  - Snapshots moved from /tmp to /data/ (Railway persistent volume)
-  - Snapshot fallback to /tmp if /data/ not mounted
-  - save_otb_snapshot called automatically in read_otb
+  - Snapshots in /data/ (Railway persistent volume) with /tmp fallback
 """
 
 import logging
@@ -57,7 +56,6 @@ def precio_alojamiento(b):
 
 
 def parsear_reserva(b):
-    from datetime import datetime
     ci = parse_date(b["arrival"])
     co = parse_date(b["departure"])
     nights = (co - ci).days
@@ -86,7 +84,6 @@ def parsear_reserva(b):
 # ══════════════════════════════════════════
 
 def read_otb():
-    """Read current OTB (on-the-books) — units booked per date."""
     today = date.today()
     end = today + timedelta(days=config.PRICING_HORIZON)
 
@@ -96,7 +93,6 @@ def read_otb():
         "propertyId": config.PROPERTY_ID,
     })
 
-    # Also get in-house guests
     active_bks = api_get("bookings", {
         "departureFrom": fmt(today),
         "arrivalTo": fmt(today),
@@ -132,7 +128,6 @@ def read_otb():
 
     log.info(f"  OTB: {len(otb)} fechas")
 
-    # Auto-save snapshot for pickup
     try:
         save_otb_snapshot(otb)
     except Exception as e:
@@ -142,12 +137,6 @@ def read_otb():
 
 
 def read_otb_by_type():
-    """
-    Read OTB split by room type.
-    Returns: (otb_total, otb_by_type)
-      otb_total: {date_str: total_units_booked}  (same as read_otb)
-      otb_by_type: {"upper": {date_str: units}, "ground": {date_str: units}}
-    """
     today = date.today()
     end = today + timedelta(days=config.PRICING_HORIZON)
 
@@ -186,7 +175,6 @@ def read_otb_by_type():
         units = b.get("roomQty", 1) or 1
         room_id = b.get("roomId")
 
-        # Determine room type
         if room_id == config.ROOM_GROUND:
             target = otb_ground
         else:
@@ -215,18 +203,15 @@ def read_otb_by_type():
 # OTB SNAPSHOT — Persistent storage
 # ══════════════════════════════════════════
 
-# Prefer /data/ (Railway volume) over /tmp/
 SNAPSHOT_DIR = "/data" if os.path.isdir("/data") else "/tmp"
 SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "otb_snapshots.json")
 
 
 def save_otb_snapshot(otb):
-    """Save today's OTB snapshot for pickup comparison."""
     today_str = fmt(date.today())
     snapshots = _load_snapshots()
     snapshots[today_str] = otb
 
-    # Keep only last 14 days
     cutoff = fmt(date.today() - timedelta(days=14))
     snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
 
@@ -249,12 +234,10 @@ def _load_snapshots():
 # ══════════════════════════════════════════
 
 def calc_pickup(otb_actual):
-    """Calculate pickup: OTB today - OTB 7 days ago, per date."""
     pickup = {}
     snapshots = _load_snapshots()
     today = date.today()
 
-    # Find snapshot closest to 7 days ago
     otb_7ago = None
     for offset in (7, 6, 8):
         key = fmt(today - timedelta(days=offset))
@@ -277,10 +260,9 @@ def calc_pickup(otb_actual):
 # ══════════════════════════════════════════
 
 def fetch_historical_bookings(years=None):
-    """Fetch all active bookings for given years."""
     if years is None:
         years = config.HISTORICAL_YEARS
-    
+
     all_bookings = []
     for year in years:
         bks = api_get_all("bookings", {
@@ -324,7 +306,6 @@ def fetch_historical_bookings(years=None):
 # ══════════════════════════════════════════
 
 def get_segment_key(d):
-    """Get segment key for fill curves: M-HH-DT (e.g., 7-1H-WD)."""
     if isinstance(d, str):
         d = parse_date(d)
     m = d.month
@@ -334,7 +315,6 @@ def get_segment_key(d):
 
 
 def build_fill_curves(bookings):
-    """Build fill curves from historical bookings."""
     stays_by_seg = {}
     for b in bookings:
         ci = b["ci"]
@@ -365,7 +345,6 @@ def build_fill_curves(bookings):
 
 
 def get_expected_occ(fill_curves, seg_key, days_out):
-    """Interpolate expected occupancy from fill curves."""
     curve = fill_curves.get(seg_key)
     if not curve:
         return 0.5
@@ -387,27 +366,68 @@ def get_expected_occ(fill_curves, seg_key, days_out):
 
 
 # ══════════════════════════════════════════
-# PACE
+# PACE — v7.3: MULTI-YEAR WEIGHTED AVERAGE
 # ══════════════════════════════════════════
 
 def calc_pace(hist):
-    """Calculate pace: OTB at this point last year."""
+    """
+    v7.3: Pace uses WEIGHTED AVERAGE of all historical years.
+    Instead of only comparing vs LY (which might be anomalous),
+    we compare vs the weighted mean of 2023/2024/2025.
+    This gives a stable benchmark for booking velocity.
+
+    Returns: {date_str: weighted_avg_occ_at_this_lead_time}
+    """
     pace = {}
     today = date.today()
-    last_year = today.year - 1
-    hist_ly = [b for b in hist if b["year"] == last_year]
-    if not hist_ly:
+
+    # Group historical bookings by year
+    hist_by_year = {}
+    for b in hist:
+        y = b["year"]
+        if y not in hist_by_year:
+            hist_by_year[y] = []
+        hist_by_year[y].append(b)
+
+    if not hist_by_year:
         return pace
 
     for di in range(config.PRICING_HORIZON):
         d = today + timedelta(days=di)
-        d_ly = d.replace(year=last_year) if d.month != 2 or d.day != 29 else d.replace(year=last_year, day=28)
-        deadline = d_ly - timedelta(days=di)
+        date_str = fmt(d)
 
-        res_ly = sum(1 for b in hist_ly if b["ci"] <= d_ly < b["co"] and b["bd"] <= deadline)
-        if res_ly > 0:
-            pace[fmt(d)] = res_ly / config.TOTAL_UNITS
+        weighted_occ_sum = 0.0
+        weight_sum = 0.0
 
+        for year, year_bks in hist_by_year.items():
+            w = config.CURVE_WEIGHTS.get(year, 0.33)
+
+            # Find equivalent date in historical year
+            try:
+                d_hist = d.replace(year=year)
+            except ValueError:
+                # Feb 29 edge case
+                d_hist = d.replace(year=year, month=2, day=28)
+
+            # Deadline: how many bookings existed at the same lead time?
+            deadline = d_hist - timedelta(days=di)
+
+            # Count reservations for that date booked by the deadline
+            res = sum(
+                1 for b in year_bks
+                if b["ci"] <= d_hist < b["co"] and b["bd"] <= deadline
+            )
+
+            if res > 0:
+                occ = res / config.TOTAL_UNITS
+                weighted_occ_sum += occ * w
+                weight_sum += w
+
+        if weight_sum > 0:
+            pace[date_str] = weighted_occ_sum / weight_sum
+
+    years_used = sorted(hist_by_year.keys())
+    log.info(f"  Pace v7.3: {len(pace)} fechas (media ponderada de {len(years_used)} años: {years_used})")
     return pace
 
 
@@ -416,7 +436,6 @@ def calc_pace(hist):
 # ══════════════════════════════════════════
 
 def read_current_prices():
-    """Read prices of existing bookings (for price protection)."""
     today = date.today()
     end = today + timedelta(days=config.PRICING_HORIZON)
 
