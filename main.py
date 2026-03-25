@@ -1,13 +1,14 @@
 """
-RMS Estanques v7.3 — Python/Railway Edition
+RMS Estanques v7.4 — Python/Railway Edition
 Main entry point — Flask server + APScheduler + webhook handler
 
-v7.3 CHANGES:
-  - Direct price multipliers (fOTB, fPickup, fPace, fTotal)
-  - Multi-year historical data (3 years for fill curves)
-  - Revenue audit: compares vs BEST historical year
-  - /prices/compare shows multiplier columns
-  - /explicacion shows revenue audit dashboard
+v7.4 CHANGES:
+  - Suelos calibrados desde ADR real del mejor año histórico
+  - Pace multi-año ponderado (2023/2024/2025)
+  - Urgency eliminado — presión temporal integrada en pricing
+  - Comp set adj desactivado en UA/A
+  - Apify desactivado — Booking Analytics es la fuente de verdad para peers
+  - Email mensual día 1: solicita datos Booking Analytics
 """
 
 import os
@@ -47,7 +48,6 @@ def run_full():
     from rms.beds24 import get_token
     from rms.otb import read_otb_by_type
     from rms.capa_a import cargar_capa_a, check_and_recalibrate
-    from rms.compset import check_and_update_comp_set
     from rms.vacaciones import check_and_update_vacaciones
     from rms.events import build_events
     from rms.pricing import calcular_precios_v7
@@ -79,13 +79,12 @@ def run_full():
         else:
             cargar_capa_a()
 
-        # Step 3: Comp Set check
+        # Step 3: Comp Set — DESACTIVADO v7.4
+        # Apify no captura fiablemente los 6 peers específicos.
+        # Referencia de peer pricing → BOOKING_ANALYTICS en config.py
+        # Actualización manual mensual vía email del RMS (día 1 de cada mes).
         log.info("\n── STEP 3: Comp Set ──")
-        comp_updated = check_and_update_comp_set()
-        if comp_updated:
-            log.info(f"  ✅ Comp Set actualizado ({len(comp_updated)} ventanas)")
-        else:
-            log.info("  Usando ADR_PEER existente")
+        log.info("  Apify desactivado — referencia: Booking Analytics (config.py)")
 
         # Step 4: Vacaciones check
         log.info("\n── STEP 4: Vacaciones escolares ──")
@@ -95,7 +94,7 @@ def run_full():
         else:
             log.info("  Cache de vacaciones vigente")
 
-        # Step 4b: Market Intelligence
+        # Step 4b: Market Intelligence (AirROI)
         log.info("\n── STEP 4b: Market Intelligence ──")
         try:
             from rms.market_intelligence import check_and_update_market
@@ -110,12 +109,12 @@ def run_full():
         # Step 5: Load data
         log.info("\n── STEP 5: Cargar datos ──")
         otb, otb_by_type = read_otb_by_type()
-        log.info(f"  ✅ OTB: {len(otb)} fechas (per-type loaded)")
+        log.info(f"  ✅ OTB: {len(otb)} fechas")
         events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
 
-        # Step 6: Calculate prices v7.3
-        log.info("\n── STEP 6: Calcular precios v7.3 ──")
+        # Step 6: Calculate prices v7.4
+        log.info("\n── STEP 6: Calcular precios v7.4 ──")
         results = calcular_precios_v7(otb, events, otb_by_type=otb_by_type)
         log.info(f"  ✅ {len(results)} días calculados")
 
@@ -175,7 +174,7 @@ def run_full():
         _last_claude = claude_result
 
         elapsed = (datetime.now() - start).total_seconds()
-        log.info(f"\n✅ RMS v7.3 completado en {elapsed:.1f}s")
+        log.info(f"\n✅ RMS v7.4 completado en {elapsed:.1f}s")
 
     except Exception as e:
         log.error(f"❌ Error fatal: {e}", exc_info=True)
@@ -227,16 +226,15 @@ def audit_results(results):
         if dias_techo > 20:
             warnings.append(f"{dias_techo} días limitados por TECHO")
 
-        # v7.3: warn if multipliers aren't working
         mult_active = sum(1 for r in results if abs(r.get("fTotal", 1.0) - 1.0) > 0.02)
         if mult_active < 10:
-            warnings.append(f"Solo {mult_active} días con multiplicadores activos — revisar señales")
+            warnings.append(f"Solo {mult_active} días con multiplicadores activos")
 
     return {"ok": ok, "alertas": alertas, "warnings": warnings}
 
 
 # ══════════════════════════════════════════
-# WEBHOOK HANDLER
+# WEBHOOK
 # ══════════════════════════════════════════
 
 @app.route("/webhook/booking", methods=["POST"])
@@ -254,7 +252,7 @@ def webhook_booking():
 
 
 # ══════════════════════════════════════════
-# API ENDPOINTS
+# ENDPOINTS
 # ══════════════════════════════════════════
 
 @app.route("/health")
@@ -281,7 +279,6 @@ def trigger_run():
 
 @app.route("/prices/compare")
 def prices_compare():
-    """v7.3: Shows multiplier columns for full transparency."""
     if not _last_results:
         return "No results yet. Hit /run first.", 404
 
@@ -289,8 +286,7 @@ def prices_compare():
     header = (f"{'Fecha':<11}| {'Disp':>4} | {'Precio':>6} | {'Genius':>6} | "
               f"{'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | "
               f"{'fOTB':>5} | {'fPick':>5} | {'fPace':>5} | {'fTot':>5} | "
-              f"{'Urg':>4} | {'EBSA':>5} | {'Boost':>5} | "
-              f"{'Clamp':>5} | {'MinSt':>5} | {'Vac':>4}")
+              f"{'EBSA':>5} | {'Boost':>5} | {'Clamp':>5} | {'MinSt':>5} | {'Vac':>4}")
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -303,7 +299,7 @@ def prices_compare():
             f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>4}€ | {r['precioGenius']:>4}€ | "
             f"{r.get('suelo',''):>5} | {r.get('techo',''):>5} | {r.get('precioNeto',''):>5} | "
             f"{r.get('fOTB',1.0):>5.2f} | {r.get('fPickup',1.0):>5.2f} | {r.get('fPace',1.0):>5.2f} | {r.get('fTotal',1.0):>5.2f} | "
-            f"{r.get('urgency',1.0):>4.1f} | {r.get('fEBSA',1.0):>5.2f} | {r.get('boostUA',1.0):>5.2f} | "
+            f"{r.get('fEBSA',1.0):>5.2f} | {r.get('boostUA',1.0):>5.2f} | "
             f"{r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | {r.get('vacFactor',1.0):>4.2f}"
         )
 
@@ -331,7 +327,6 @@ def email_view():
 
 @app.route("/explicacion")
 def explicacion():
-    """Human-readable explanation of all prices + revenue audit."""
     if not _last_results:
         return "<h1>No hay datos. Ejecuta <a href='/run'>/run</a> primero.</h1>", 404
     from rms.explicacion import generar_explicacion_html
@@ -346,14 +341,15 @@ def market_test():
     key = os.getenv("AIRROI_API_KEY", "")
     headers = {"X-API-KEY": key, "Content-Type": "application/json"}
     results = {}
-    r1 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines"}, "num_months": 6}, timeout=15)
-    results["occ_locality"] = r1.json() if r1.status_code == 200 else {"status": r1.status_code, "text": r1.text[:300]}
-    r2 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines", "district": "Colònia de Sant Jordi"}, "num_months": 6}, timeout=15)
-    results["occ_district"] = r2.json() if r2.status_code == 200 else {"status": r2.status_code, "text": r2.text[:300]}
-    r3 = req.post("https://api.airroi.com/listings/search/radius", headers=headers, json={"latitude": 39.3167, "longitude": 2.9889, "radius_miles": 2, "pagination": {"page_size": 5, "offset": 0}, "currency": "native"}, timeout=15)
-    results["compset"] = r3.json() if r3.status_code == 200 else {"status": r3.status_code, "text": r3.text[:300]}
-    r4 = req.get("https://api.airroi.com/markets/lookup?lat=39.3167&lng=2.9889", headers=headers, timeout=15)
-    results["coords"] = r4.json() if r4.status_code == 200 else {"status": r4.status_code, "text": r4.text[:300]}
+    r1 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers,
+                  json={"market": {"country": "Spain", "region": "Balearic Islands",
+                        "locality": "ses Salines"}, "num_months": 6}, timeout=15)
+    results["occ_locality"] = r1.json() if r1.status_code == 200 else {"status": r1.status_code}
+    r2 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers,
+                  json={"market": {"country": "Spain", "region": "Balearic Islands",
+                        "locality": "ses Salines", "district": "Colònia de Sant Jordi"},
+                        "num_months": 6}, timeout=15)
+    results["occ_district"] = r2.json() if r2.status_code == 200 else {"status": r2.status_code}
     return jsonify(results)
 
 
