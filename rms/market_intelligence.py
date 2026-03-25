@@ -225,16 +225,20 @@ def _update_market_occ(occ_data):
 
 
 def _update_market_adr(adr_data):
-    """Update ADR_PEER with real market data."""
+    \"\"\"Store market-wide ADR separately. Does NOT overwrite ADR_PEER.
+    
+    ADR_PEER is for direct competitors (Apify scraping).
+    MARKET_ADR is for the whole market (AirROI) — used as context only.
+    \"\"\"
+    if not hasattr(config, 'MARKET_ADR'):
+        config.MARKET_ADR = {}
     for entry in adr_data:
         d = entry.get("date", "")
         adr = entry.get("avg") or entry.get("adr") or entry.get("value")
         if d and adr and adr > 0:
             month = int(d[5:7])
-            old = config.COMP_SET["ADR_PEER"].get(month, 0)
-            config.COMP_SET["ADR_PEER"][month] = round(adr)
-            if old != round(adr):
-                log.info(f"    ADR_PEER M{month}: {old}€ → {round(adr)}€ (AirROI market)")
+            config.MARKET_ADR[month] = round(adr)
+            log.info(f"    Market ADR M{month}: {round(adr)}€ (AirROI — referencia, NO comp set)")
 
 
 def _log_comp_set_summary(comp_set):
