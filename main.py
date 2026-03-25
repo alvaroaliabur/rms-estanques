@@ -308,6 +308,17 @@ def email_view():
     return email["html"]
 
 
+@app.route("/explicacion")
+def explicacion():
+    """Human-readable explanation of all 365 prices."""
+    if not _last_results:
+        return "<h1>No hay datos. Ejecuta <a href='/run'>/run</a> primero.</h1>", 404
+    from rms.explicacion import generar_explicacion_html
+    month = request.args.get("month", type=int)
+    date_filter = request.args.get("date", type=str)
+    return generar_explicacion_html(_last_results, month_filter=month, date_filter=date_filter)
+
+
 @app.route("/market/test")
 def market_test():
     import requests as req
