@@ -1,6 +1,9 @@
 """
-Events — Automatic event generation + school holidays factor.
-Replaces: generarEventosAutomaticos_, getEventFactor_, getVacacionesFactor_
+Events — v7.2
+CHANGES:
+  - get_vacaciones_factor now actually reads from vacaciones cache
+  - Connected to vacaciones.py module properly
+  - No longer a stub returning 1.0
 """
 
 import logging
@@ -37,7 +40,6 @@ def build_events():
     for y in [today.year, today.year + 1]:
         pascua = _easter(y)
         dom_ramos = pascua - timedelta(days=7)
-
         events.append({
             "name": f"Semana Santa {y}",
             "from": fmt(dom_ramos - timedelta(days=1)),
@@ -79,13 +81,13 @@ def build_events():
 
         # Puente Constitución-Inmaculada
         d6 = date(y, 12, 6).weekday()
-        if d6 in (3, 2):  # Thu or Wed
+        if d6 in (3, 2):
             events.append({"name": f"Puente Constitución-Inmaculada {y}",
-                           "from": f"{y}-12-05", "to": f"{y}-12-09", "factor": 1.20, "minStayOverride": 3})
+                          "from": f"{y}-12-05", "to": f"{y}-12-09", "factor": 1.20, "minStayOverride": 3})
 
         # Nochevieja
         events.append({"name": f"Nochevieja {y}",
-                        "from": f"{y}-12-30", "to": f"{y+1}-01-02", "factor": 1.25, "minStayOverride": 4, "floorOverride": 160})
+                       "from": f"{y}-12-30", "to": f"{y+1}-01-02", "factor": 1.25, "minStayOverride": 4, "floorOverride": 160})
 
         # Local events
         events.append({"name": f"Dia Illes Balears {y}", "from": f"{y}-02-28", "to": f"{y}-03-02", "factor": 1.05})
@@ -119,14 +121,46 @@ def get_event_factor(date_str, events):
 
 
 # ══════════════════════════════════════════
-# SCHOOL HOLIDAYS (stub — loaded from file/DB)
+# SCHOOL HOLIDAYS — Connected to vacaciones.py
 # ══════════════════════════════════════════
 
 _vacaciones_cache = None
 
 
+def load_vacaciones_cache():
+    """Load school holidays data from vacaciones module."""
+    global _vacaciones_cache
+    try:
+        from rms.vacaciones import get_cached_vacaciones
+        _vacaciones_cache = get_cached_vacaciones()
+        if _vacaciones_cache:
+            log.info(f"  Vacaciones cache loaded: {len(_vacaciones_cache)} dates with boost")
+    except Exception as e:
+        log.warning(f"  Could not load vacaciones cache: {e}")
+        _vacaciones_cache = {}
+
+
 def get_vacaciones_factor(date_str):
-    """Get school holiday factor. Returns 1.0 if no data."""
-    # TODO: Implement OpenHolidays API integration
-    # For now, return 1.0 (neutral) — same as GAS when no data loaded
+    """
+    Get school holiday factor for a date.
+    
+    Returns a factor >= 1.0 based on how many school holiday
+    markets (DE, NL, UK) overlap on this date.
+    
+    The vacaciones module pre-computes a dict:
+        {date_str: {"factor": 1.08, "markets": ["DE", "NL"]}}
+    """
+    global _vacaciones_cache
+
+    # Lazy load on first call
+    if _vacaciones_cache is None:
+        load_vacaciones_cache()
+
+    if not _vacaciones_cache:
+        return 1.0
+
+    entry = _vacaciones_cache.get(date_str)
+    if entry:
+        return entry.get("factor", 1.0)
+
     return 1.0
