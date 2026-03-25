@@ -1,24 +1,11 @@
 """
-RMS Estanques v7.1 — Python/Railway Edition
+RMS Estanques v7.2 — Python/Railway Edition
 Main entry point — Flask server + APScheduler + webhook handler
 
-DAILY RUN (05:00 UTC / 07:00 Spain):
-1. Connect Beds24
-2. Check & rebuild Capa A (quarterly)
-3. Check & update Comp Set (weekly, Wednesdays)
-4. Check & update Vacaciones (monthly)
-5. Load OTB + events
-6. Calculate prices v7 (forecast → optimize → execute → smooth)
-7. Claude API optimization
-8. Audit
-9. Apply prices to Beds24 (unless DRY_RUN)
-10. Revenue tracker
-11. Feedback check
-12. Email daily report
-
-WEBHOOK (on booking/cancellation):
-- Recalculate prices for affected dates
-- Apply immediately
+v7.2 CHANGES:
+  - read_otb_by_type() for per-room-type gap detection
+  - otb_by_type passed to calcular_precios_v7
+  - Version bumped to v7.2
 """
 
 import os
@@ -28,7 +15,6 @@ from datetime import datetime, date
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -37,13 +23,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("RMS")
 
-# ══════════════════════════════════════════
-# FLASK APP
-# ══════════════════════════════════════════
-
 app = Flask(__name__)
 
-# Store last run results for /prices/compare endpoint
 _last_results = []
 _last_audit = {}
 _last_claude = {}
@@ -55,7 +36,7 @@ def run_full():
     
     from rms import config
     from rms.beds24 import get_token
-    from rms.otb import read_otb
+    from rms.otb import read_otb_by_type
     from rms.capa_a import cargar_capa_a, check_and_recalibrate
     from rms.compset import check_and_update_comp_set
     from rms.vacaciones import check_and_update_vacaciones
@@ -68,7 +49,7 @@ def run_full():
     
     start = datetime.now()
     log.info("══════════════════════════════════════════")
-    log.info("  RMS ESTANQUES v7.1 — Full Pricing Run")
+    log.info("  RMS ESTANQUES v7.2 — Full Pricing Run")
     log.info(f"  {start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("══════════════════════════════════════════")
     
@@ -104,6 +85,7 @@ def run_full():
             log.info(f"  ✅ Vacaciones actualizadas ({len(vac_updated)} días con boost)")
         else:
             log.info("  Cache de vacaciones vigente")
+
         # Step 4b: Market Intelligence (AirROI)
         log.info("\n── STEP 4b: Market Intelligence ──")
         try:
@@ -116,16 +98,16 @@ def run_full():
         except Exception as e:
             log.warning(f"  Market intelligence error: {e}")
             
-        # Step 5: Load data
+        # Step 5: Load data — NOW WITH PER-TYPE OTB
         log.info("\n── STEP 5: Cargar datos ──")
-        otb = read_otb()
-        log.info(f"  ✅ OTB: {len(otb)} fechas")
+        otb, otb_by_type = read_otb_by_type()
+        log.info(f"  ✅ OTB: {len(otb)} fechas (per-type loaded)")
         events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
         
-        # Step 6: Calculate prices v7
-        log.info("\n── STEP 6: Calcular precios v7 ──")
-        results = calcular_precios_v7(otb, events)
+        # Step 6: Calculate prices v7.2 — WITH otb_by_type
+        log.info("\n── STEP 6: Calcular precios v7.2 ──")
+        results = calcular_precios_v7(otb, events, otb_by_type=otb_by_type)
         log.info(f"  ✅ {len(results)} días calculados")
         
         # Step 7: Audit
@@ -179,13 +161,12 @@ def run_full():
         except Exception as e:
             log.warning(f"  Email error: {e}")
         
-        # Store for API endpoints
         _last_results = results
         _last_audit = audit
         _last_claude = claude_result
         
         elapsed = (datetime.now() - start).total_seconds()
-        log.info(f"\n✅ RMS completado en {elapsed:.1f}s")
+        log.info(f"\n✅ RMS v7.2 completado en {elapsed:.1f}s")
         
     except Exception as e:
         log.error(f"❌ Error fatal: {e}", exc_info=True)
@@ -245,18 +226,12 @@ def audit_results(results):
 
 @app.route("/webhook/booking", methods=["POST"])
 def webhook_booking():
-    """Handle Beds24 booking webhook — trigger repricing."""
     log.info("📨 Webhook recibido: booking event")
-    
     try:
-        # Parse webhook data (Beds24 Auto Action format)
         data = request.get_json(silent=True) or {}
         booking_id = data.get("bookingId") or data.get("id") or "unknown"
         log.info(f"  Booking ID: {booking_id}")
-        
-        # Run full pricing (in production, could be partial for affected dates)
         run_full()
-        
         return jsonify({"status": "ok", "action": "repricing_triggered"})
     except Exception as e:
         log.error(f"  Webhook error: {e}")
@@ -273,14 +248,13 @@ def health():
     next_run = str(scheduler_job.next_run_time) if scheduler_job else "not scheduled"
     return jsonify({
         "status": "ok",
-        "service": "RMS Estanques v7.1",
+        "service": "RMS Estanques v7.2",
         "next_run": next_run,
     })
 
 
 @app.route("/run")
 def trigger_run():
-    """Manual trigger for full pricing run."""
     run_full()
     return jsonify({
         "status": "ok",
@@ -291,12 +265,11 @@ def trigger_run():
 
 @app.route("/prices/compare")
 def prices_compare():
-    """Show July-August prices for comparison."""
     if not _last_results:
         return "No results yet. Hit /run first.", 404
     
     lines = []
-    header = f"{'Fecha':<11}| {'Disp':>4} | {'Precio PY':>10} | {'Genius':>7} | {'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | {'DispV':>5} | {'Fcst':>4} | {'Clamp':>5} | {'MinSt':>5}"
+    header = f"{'Fecha':<11}| {'Disp':>4} | {'Precio PY':>10} | {'Genius':>7} | {'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | {'DispV':>5} | {'Fcst':>4} | {'Clamp':>5} | {'MinSt':>5} | {'MnGnd':>5} | {'Vac':>4} | {'Mkt':>4}"
     lines.append(header)
     lines.append("-" * len(header))
     
@@ -309,7 +282,8 @@ def prices_compare():
         
         lines.append(
             f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>7}€ | {r['precioGenius']:>5}€ | {r.get('suelo',''):>5} | {r.get('techo',''):>5} | "
-            f"{r.get('precioNeto',''):>5} | {r.get('dispVirtual',''):>5} | {r.get('forecastDemanda',''):>4} | {r.get('clampedBy',''):>5} | {r.get('minStay',''):>5}"
+            f"{r.get('precioNeto',''):>5} | {r.get('dispVirtual',''):>5} | {r.get('forecastDemanda',''):>4} | {r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | "
+            f"{r.get('minStayGround',''):>5} | {r.get('vacFactor',1.0):>4} | {r.get('marketFactor',1.0):>4}"
         )
     
     return "<pre>" + "\n".join(lines) + "</pre>"
@@ -317,14 +291,14 @@ def prices_compare():
 
 @app.route("/revenue")
 def revenue_endpoint():
-    """Show revenue tracker."""
     try:
         from rms.revenue import calcular_revenue_tracker
         tracker = calcular_revenue_tracker()
         return jsonify(tracker)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-        
+
+
 @app.route("/email")
 def email_view():
     from rms.email_report import get_last_email
@@ -333,26 +307,23 @@ def email_view():
         return "<h1>No email generated yet. Hit /run first.</h1>", 404
     return email["html"]
 
-@app.route("/market/test")
+
 @app.route("/market/test")
 def market_test():
     import requests as req
     key = os.getenv("AIRROI_API_KEY", "")
     headers = {"X-API-KEY": key, "Content-Type": "application/json"}
     results = {}
-    # Test 1: Market metrics at locality level (ses Salines)
     r1 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines"}, "num_months": 6}, timeout=15)
     results["occ_locality"] = r1.json() if r1.status_code == 200 else {"status": r1.status_code, "text": r1.text[:300]}
-    # Test 2: Market metrics at district level
     r2 = req.post("https://api.airroi.com/markets/metrics/occupancy", headers=headers, json={"market": {"country": "Spain", "region": "Balearic Islands", "locality": "ses Salines", "district": "Colònia de Sant Jordi"}, "num_months": 6}, timeout=15)
     results["occ_district"] = r2.json() if r2.status_code == 200 else {"status": r2.status_code, "text": r2.text[:300]}
-    # Test 3: Comp set by radius
     r3 = req.post("https://api.airroi.com/listings/search/radius", headers=headers, json={"latitude": 39.3167, "longitude": 2.9889, "radius_miles": 2, "pagination": {"page_size": 5, "offset": 0}, "currency": "native"}, timeout=15)
     results["compset"] = r3.json() if r3.status_code == 200 else {"status": r3.status_code, "text": r3.text[:300]}
-    # Test 4: Coordinates lookup
     r4 = req.get("https://api.airroi.com/markets/lookup?lat=39.3167&lng=2.9889", headers=headers, timeout=15)
     results["coords"] = r4.json() if r4.status_code == 200 else {"status": r4.status_code, "text": r4.text[:300]}
     return jsonify(results)
+
 
 # ══════════════════════════════════════════
 # SCHEDULER
@@ -362,11 +333,6 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(run_full, "cron", hour=5, minute=0, id="daily_full")
 scheduler.start()
 log.info("⏰ Scheduler: daily full run at 05:00 UTC")
-
-
-# ══════════════════════════════════════════
-# START
-# ══════════════════════════════════════════
 
 port = int(os.getenv("PORT", 8080))
 log.info(f"🌐 Servidor arrancado en puerto {port}")
