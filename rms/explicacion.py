@@ -1,11 +1,12 @@
 """
-Explicación — v7.3 Final
-Compact dashboard (1 screen) + click-to-expand date details.
-
-3 questions in 10 seconds:
-  1. ¿Vamos ganando? Revenue vs best year
-  2. ¿Se está llenando? Fill speed per month
-  3. ¿Hay que hacer algo? Action alerts
+Explicación — v7.4
+Dashboard rediseñado:
+- ADR propio vs ADR grupo referencia (Booking Analytics)
+- Tabla de meses centrada, columnas claras
+- Indicador de pace visual (velocidad de llenado)
+- Alertas accionables con qué hacer exactamente
+- Detalle por fecha: tabla compacta, expansión limpia
+- Columnas centradas
 """
 
 import logging
@@ -15,471 +16,659 @@ from rms import config
 log = logging.getLogger(__name__)
 
 MONTH_NAMES = {
-    1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-    5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-    9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
-}
-
-MONTH_SHORT = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
 }
-
-
-def _get_revenue_tracker():
-    try:
-        from rms.revenue import calcular_revenue_tracker
-        return calcular_revenue_tracker()
-    except Exception as e:
-        log.warning(f"Revenue tracker unavailable: {e}")
-        return {}
+MONTH_NAMES_FULL = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+DAY_NAMES = {
+    0: "L", 1: "M", 2: "X", 3: "J", 4: "V", 5: "S", 6: "D",
+}
+DAY_NAMES_FULL = {
+    0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves",
+    4: "viernes", 5: "sábado", 6: "domingo",
+}
 
 
 # ══════════════════════════════════════════
-# COMPACT DASHBOARD
+# DASHBOARD — Vista superior (1 pantalla)
 # ══════════════════════════════════════════
 
-def _build_dashboard(tracker, results):
+def _build_dashboard(results):
     today = date.today()
-    if not tracker:
-        return "<div class='dash warn'>Sin datos de revenue. Ejecuta <a href='/run'>/run</a>.</div>"
-
-    html = "<div class='dash'>"
-
-    # YTD headline
-    ytd_ty = sum(tracker[m]["ty_revenue"] for m in range(1, today.month + 1) if m in tracker)
-    ytd_best = sum(tracker[m].get("best_revenue", tracker[m].get("ly_revenue", 0))
-                   for m in range(1, today.month + 1) if m in tracker)
-    ytd_diff = round((ytd_ty - ytd_best) / ytd_best * 100) if ytd_best > 0 else 0
-
-    if ytd_diff >= 5:
-        yc = "#2d7a3a"
-    elif ytd_diff >= 0:
-        yc = "#8a6d00"
-    else:
-        yc = "#c0392b"
-
-    html += (f"<div class='ytd' style='border-left:5px solid {yc}'>"
-             f"YTD: <strong>{ytd_ty:,.0f}€</strong> vs {ytd_best:,.0f}€ mejor hist. "
-             f"<strong style='color:{yc}'>({ytd_diff:+d}%)</strong></div>")
-
-    # Month grid
-    html += "<table class='grid'>"
-    html += "<tr><th></th><th>Revenue</th><th>vs Mejor</th><th>ADR</th><th>Disp</th><th>Llenado</th><th></th></tr>"
-
-    start_m = max(1, today.month - 1)
-    end_m = min(12, today.month + 6)
-
-    for m in range(start_m, end_m + 1):
-        t = tracker.get(m)
-        if not t:
-            continue
-
-        diff = t["diff_pct"]
-        best_rev = t.get("best_revenue", t.get("ly_revenue", 0))
-        best_year = t.get("best_year", today.year - 1)
-
-        if diff >= 10:
-            icon, bg = "🟢", "#eafaea"
-        elif diff >= 0:
-            icon, bg = "🟡", "#fefce8"
-        elif diff >= -15:
-            icon, bg = "🟠", "#fff3e0"
-        else:
-            icon, bg = "🔴", "#fde8e8"
-
-        month_results = [r for r in results if int(r["date"][5:7]) == m]
-        if month_results:
-            avg_disp = sum(r.get("disponibles", 0) for r in month_results) / len(month_results)
-            booked_pct = round((1 - avg_disp / 9) * 100)
-        else:
-            avg_disp = 9
-            booked_pct = 0
-
-        if m < today.month:
-            speed = "cerrado"
-            sc = "#999"
-        elif booked_pct > 70:
-            speed = f"🚀 {booked_pct}%"
-            sc = "#2d7a3a"
-        elif booked_pct > 40:
-            speed = f"→ {booked_pct}%"
-            sc = "#333"
-        elif booked_pct > 15:
-            speed = f"⚠ {booked_pct}%"
-            sc = "#e67e22"
-        else:
-            speed = f"🐌 {booked_pct}%"
-            sc = "#c0392b"
-
-        marker = "◉" if m == today.month else ""
-
-        # ADR comparison
-        ty_adr = t.get("ty_adr", 0)
-        best_adr = t.get("best_adr", t.get("ly_adr", 0))
-        if ty_adr > 0 and best_adr > 0:
-            adr_diff = round((ty_adr - best_adr) / best_adr * 100)
-            adr_color = "#2d7a3a" if adr_diff >= 0 else "#c0392b"
-            adr_cell = f"{ty_adr}€ <small style='color:{adr_color}'>({adr_diff:+d}%)</small>"
-        elif ty_adr > 0:
-            adr_cell = f"{ty_adr}€"
-        else:
-            adr_cell = "—"
-
-        html += (f"<tr style='background:{bg}'>"
-                 f"<td><strong>{MONTH_SHORT[m]}</strong> {marker}</td>"
-                 f"<td class='r'>{t['ty_revenue']:,}€</td>"
-                 f"<td class='r'><strong>{diff:+d}%</strong> <small>({best_year})</small></td>"
-                 f"<td class='r'>{adr_cell}</td>"
-                 f"<td class='r'>{avg_disp:.1f}</td>"
-                 f"<td style='color:{sc}'>{speed}</td>"
-                 f"<td>{icon}</td></tr>")
-
-    html += "</table>"
-
-    # Channel mix — direct vs OTAs
-    html += _build_channel_html(tracker, today)
-
-    # Actions
-    actions = _generate_actions(tracker, results)
-    if actions:
-        html += "<div class='actions'>"
-        for a in actions:
-            html += f"<div class='act {a['level']}'>{a['icon']} <strong>{a['month']}:</strong> {a['text']}</div>"
-        html += "</div>"
-
-    html += "</div>"
-    return html
-
-
-def _build_channel_html(tracker, today):
-    """Compact channel mix: direct vs booking vs others, with net revenue."""
     current_year = today.year
 
-    # Aggregate channel data across all months this year
-    total_by_channel = {}
-    ly_direct_pct = 0
-    ly_total_rev = 0
+    # YTD
+    ytd_rev = 0
+    ytd_genius = 0
+    best_hist_ytd = 0
 
-    for m in range(1, 13):
-        t = tracker.get(m)
-        if not t:
+    # Agrupar por mes
+    meses = {}
+    for r in results:
+        m = int(r["date"][5:7])
+        y = int(r["date"][:4])
+        if y != current_year:
             continue
+        if m not in meses:
+            meses[m] = {
+                "n": 0, "reservadas": 0, "sum_precio": 0,
+                "suelos": 0, "techos": 0, "presion": 0,
+                "rev_otb": 0,
+            }
+        mm = meses[m]
+        mm["n"] += 1
+        mm["reservadas"] += r.get("reservadas", 0)
+        mm["sum_precio"] += r.get("precioFinal", 0)
+        if r.get("clampedBy") == "SUELO":
+            mm["suelos"] += 1
+        if r.get("clampedBy") == "TECHO":
+            mm["techos"] += 1
+        if r.get("presionTemporal"):
+            mm["presion"] += 1
 
-        for ch_name, ch_data in t.get("channels_ty", {}).items():
-            if ch_name not in total_by_channel:
-                total_by_channel[ch_name] = {"revenue": 0, "net_revenue": 0, "nights": 0, "count": 0}
-            total_by_channel[ch_name]["revenue"] += ch_data.get("revenue", 0)
-            total_by_channel[ch_name]["net_revenue"] += ch_data.get("net_revenue", 0)
-            total_by_channel[ch_name]["nights"] += ch_data.get("nights", 0)
-            total_by_channel[ch_name]["count"] += ch_data.get("count", 0)
+    # Revenue tracker (desde config si está disponible)
+    rev_tracker = {}
+    try:
+        from rms.revenue import calcular_revenue_tracker
+        rev_tracker = calcular_revenue_tracker()
+    except Exception:
+        pass
 
-        for ch_name, ch_data in t.get("channels_ly", {}).items():
-            ly_total_rev += ch_data.get("revenue", 0)
-            if ch_name == "direct":
-                ly_direct_pct += ch_data.get("revenue", 0)
+    # YTD
+    for m in range(1, today.month + 1):
+        rt = rev_tracker.get(m, {})
+        ytd_rev += rt.get("ty_revenue", 0)
+        best_hist_ytd += rt.get("best_revenue", 0)
 
-    if not total_by_channel:
-        return ""
+    ytd_diff = round((ytd_rev - best_hist_ytd) / best_hist_ytd * 100) if best_hist_ytd > 0 else 0
+    ytd_color = "#27ae60" if ytd_diff >= 0 else "#e74c3c"
+    ytd_sign = "+" if ytd_diff >= 0 else ""
 
-    grand_total = sum(c["revenue"] for c in total_by_channel.values())
-    grand_net = sum(c["net_revenue"] for c in total_by_channel.values())
-    if grand_total == 0:
-        return ""
+    # Booking Analytics para referencia
+    ba = getattr(config, 'BOOKING_ANALYTICS', {})
 
-    # LY direct percentage
-    ly_direct_pct_val = round(ly_direct_pct / ly_total_rev * 100) if ly_total_rev > 0 else 0
+    # Filas de la tabla de meses
+    filas = ""
+    alertas_acciones = []
 
-    # Current direct percentage
-    direct_data = total_by_channel.get("direct", {"revenue": 0, "net_revenue": 0, "nights": 0, "count": 0})
-    direct_pct = round(direct_data["revenue"] / grand_total * 100) if grand_total > 0 else 0
-    direct_diff = direct_pct - ly_direct_pct_val
+    for m in sorted(meses.keys()):
+        mm = meses[m]
+        rt = rev_tracker.get(m, {})
 
-    # Color for direct trend
-    if direct_diff > 3:
-        dir_color = "#2d7a3a"
-        dir_icon = "📈"
-    elif direct_diff >= -3:
-        dir_color = "#8a6d00"
-        dir_icon = "→"
-    else:
-        dir_color = "#c0392b"
-        dir_icon = "📉"
+        n_dias = mm["n"] or 1
+        total_nights = config.TOTAL_UNITS * n_dias
+        nights_otb = mm["reservadas"]
+        occ_pct = round(nights_otb / total_nights * 100)
+        adr_pub = round(mm["sum_precio"] / n_dias) if n_dias > 0 else 0
+        adr_genius = round(adr_pub * 0.85)
 
-    commission_saved = grand_total - grand_net  # What we pay in commissions
+        # Revenue
+        rev_ty = rt.get("ty_revenue", 0)
+        best_rev = rt.get("best_revenue", 0)
+        best_year = rt.get("best_year", "")
+        diff_rev = round((rev_ty - best_rev) / best_rev * 100) if best_rev > 0 else 0
+        diff_sign = "+" if diff_rev >= 0 else ""
 
-    html = "<div style='margin-top:10px;padding:8px 12px;background:#f8f9fa;border-radius:6px;font-size:0.85em'>"
-    html += f"<strong>Canal mix {current_year}:</strong> "
+        # ADR referencia desde Booking Analytics
+        ba_m = ba.get(m, {})
+        ref_adr = ba_m.get("ref_adr", 0)
+        rank_nights = ba_m.get("rank_nights", 0)
+        total_props = ba_m.get("total_props", 26)
+        adr_vs_ref = round(((adr_genius - ref_adr) / ref_adr * 100)) if ref_adr > 0 else None
 
-    # Show each channel inline
-    sorted_channels = sorted(total_by_channel.items(), key=lambda x: x[1]["revenue"], reverse=True)
-    parts = []
-    for ch_name, ch_data in sorted_channels:
-        pct = round(ch_data["revenue"] / grand_total * 100)
-        adr = round(ch_data["revenue"] / ch_data["nights"]) if ch_data["nights"] > 0 else 0
-        net_adr = round(ch_data["net_revenue"] / ch_data["nights"]) if ch_data["nights"] > 0 else 0
-        label = ch_name.capitalize()
-        if ch_name == "direct":
-            parts.append(f"<strong style='color:#2d7a3a'>{label} {pct}%</strong> ({ch_data['count']}res, ADR {adr}€, neto {net_adr}€)")
-        elif ch_name == "booking":
-            parts.append(f"{label} {pct}% ({ch_data['count']}res, ADR {adr}€, <span style='color:#c0392b'>neto {net_adr}€</span>)")
+        # Llenado
+        is_past = m < today.month
+        is_current = m == today.month
+        if is_past:
+            llenado_txt = "cerrado"
+            llenado_color = "#95a5a6"
+            llenado_icon = "●"
         else:
-            parts.append(f"{label} {pct}% ({ch_data['count']}res)")
+            if occ_pct >= 80:
+                llenado_txt = f"{occ_pct}%"
+                llenado_color = "#27ae60"
+                llenado_icon = "🚀"
+            elif occ_pct >= 55:
+                llenado_txt = f"{occ_pct}%"
+                llenado_color = "#f39c12"
+                llenado_icon = "→"
+            else:
+                llenado_txt = f"{occ_pct}%"
+                llenado_color = "#e74c3c"
+                llenado_icon = "⚠"
 
-    html += " · ".join(parts)
+        # Color revenue
+        if diff_rev >= 5:
+            rev_color = "#27ae60"
+        elif diff_rev >= -5:
+            rev_color = "#f39c12"
+        else:
+            rev_color = "#e74c3c"
 
-    # Direct trend vs LY
-    html += f" — {dir_icon} Directas <span style='color:{dir_color}'>{direct_pct}% vs {ly_direct_pct_val}% LY ({direct_diff:+d}pp)</span>"
+        # ADR vs ref display
+        if adr_vs_ref is not None:
+            adr_ref_sign = "+" if adr_vs_ref >= 0 else ""
+            adr_ref_color = "#27ae60" if adr_vs_ref >= 0 else "#e74c3c"
+            adr_ref_html = f'<span style="color:{adr_ref_color};font-size:0.82em">({adr_ref_sign}{adr_vs_ref}% vs ref {ref_adr}€)</span>'
+        else:
+            adr_ref_html = '<span style="color:#aaa;font-size:0.82em">—</span>'
 
-    # Commission cost
-    if commission_saved > 0:
-        html += f" — Comisiones pagadas: <span style='color:#c0392b'>{commission_saved:,.0f}€</span>"
+        # Rank noches
+        if rank_nights > 0 and not is_past:
+            rank_color = "#27ae60" if rank_nights <= 10 else "#e67e22" if rank_nights <= 18 else "#e74c3c"
+            rank_html = f'<span style="color:{rank_color};font-size:0.85em">#{rank_nights}/{total_props}</span>'
+        else:
+            rank_html = ""
 
-    html += "</div>"
-    return html
+        # Presión temporal activa
+        presion_html = f'<span style="color:#e67e22;font-size:0.8em">↓{mm["presion"]}d</span>' if mm["presion"] > 0 else ""
+
+        filas += f"""
+        <tr onclick="filtrarMes({m})" style="cursor:pointer" class="fila-mes" data-mes="{m}">
+            <td style="padding:10px 12px;font-weight:600;color:#1a1a2e">{MONTH_NAMES[m]}</td>
+            <td style="padding:10px 12px;text-align:right">
+                {'<span style="color:#aaa">—</span>' if rev_ty == 0 else f'<strong>{rev_ty:,}€</strong>'}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
+                {'<span style="color:#aaa;font-size:0.85em">—</span>' if best_rev == 0 else f'<span style="color:{rev_color};font-weight:600">{diff_sign}{diff_rev}%</span><span style="color:#aaa;font-size:0.78em"> ({best_year})</span>'}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
+                <strong>{adr_genius}€</strong><br>{adr_ref_html}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
+                {rank_html}
+            </td>
+            <td style="padding:10px 12px;text-align:center;color:#666">
+                {round(nights_otb / config.TOTAL_UNITS, 1) if not is_past else '—'}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
+                <span style="color:{llenado_color};font-weight:600">{llenado_icon} {llenado_txt}</span>
+                {presion_html}
+            </td>
+        </tr>"""
+
+        # Alertas accionables
+        if not is_past and diff_rev < -15 and best_rev > 0:
+            nights_gap = round((best_rev - rev_ty) / (adr_genius if adr_genius > 0 else 200))
+            # Diagnóstico específico
+            if rank_nights > 15 and occ_pct < 60:
+                accion = f"Bajar minStay a {max(3, config.DEFAULT_MIN_STAY.get('A', 5) - 2)}n para ganar volumen. Tu rank de noches es #{rank_nights} — precio OK, el problema es volumen."
+            elif occ_pct < 40:
+                accion = f"Revisar suelo y minStay. Solo {occ_pct}% ocupado a {(date(current_year, m, 1) - today).days}d vista."
+            else:
+                accion = f"Monitorizar pickup. Necesitas ~{nights_gap} noches más para igualar {best_year}."
+            alertas_acciones.append({
+                "mes": MONTH_NAMES[m],
+                "diff": diff_rev,
+                "accion": accion,
+                "nights_otb": nights_otb,
+                "best_nights": round(best_rev / (adr_genius if adr_genius > 0 else 200)),
+            })
+
+    # Canal mix
+    canal_html = _build_canal_html(rev_tracker, today)
+
+    # Alertas
+    alertas_html = ""
+    for a in alertas_acciones:
+        alertas_html += f"""
+        <div style="background:#fff5f5;border-left:4px solid #e74c3c;padding:10px 16px;border-radius:4px;margin:6px 0;font-size:0.9em">
+            <strong style="color:#e74c3c">🔴 {a['mes']}:</strong>
+            {a['diff']}% vs mejor año. {a['nights_otb']}n vendidas.
+            <span style="color:#555"> → {a['accion']}</span>
+        </div>"""
+
+    ytd_html = ""
+    if ytd_rev > 0:
+        ytd_html = f"""
+        <div style="background:white;border-radius:10px;padding:14px 20px;margin-bottom:16px;
+                    border-left:5px solid {ytd_color};box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+            <span style="font-size:1.1em">YTD: <strong>{ytd_rev:,}€</strong>
+            vs {best_hist_ytd:,}€ mejor hist.
+            <strong style="color:{ytd_color}">({ytd_sign}{ytd_diff}%)</strong></span>
+        </div>"""
+
+    tabla = f"""
+    <div style="background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);margin-bottom:16px">
+        <table style="width:100%;border-collapse:collapse;font-size:0.9em">
+            <thead>
+                <tr style="background:#1a1a2e;color:white">
+                    <th style="padding:10px 12px;text-align:left;font-weight:600">Mes</th>
+                    <th style="padding:10px 12px;text-align:right;font-weight:600">Revenue OTB</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">vs Mejor</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">ADR (Genius / vs ref)</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">Rank noches</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">Disp media</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">Llenado</th>
+                </tr>
+            </thead>
+            <tbody id="tbody-meses">
+                {filas}
+            </tbody>
+        </table>
+    </div>"""
+
+    return ytd_html + tabla + canal_html + alertas_html
 
 
-def _generate_actions(tracker, results):
-    actions = []
-    today = date.today()
+def _build_canal_html(rev_tracker, today):
+    """Canal mix del año actual."""
+    canales = {}
+    total_rev = 0
+    total_res = 0
 
-    for m in range(today.month, min(today.month + 6, 13)):
-        t = tracker.get(m)
-        if not t:
+    for m, rt in rev_tracker.items():
+        if m > today.month:
             continue
+        for canal, datos in rt.get("channels_ty", {}).items():
+            if canal not in canales:
+                canales[canal] = {"rev": 0, "count": 0, "nights": 0, "net_rev": 0}
+            canales[canal]["rev"] += datos.get("revenue", 0)
+            canales[canal]["count"] += datos.get("count", 0)
+            canales[canal]["nights"] += datos.get("nights", 0)
+            canales[canal]["net_rev"] += datos.get("net_revenue", 0)
+            total_rev += datos.get("revenue", 0)
+            total_res += datos.get("count", 0)
 
-        diff = t["diff_pct"]
-        month_results = [r for r in results if int(r["date"][5:7]) == m]
-        if not month_results:
-            continue
+    if not canales or total_rev == 0:
+        return ""
 
-        avg_disp = sum(r.get("disponibles", 0) for r in month_results) / len(month_results)
-        suelo_days = sum(1 for r in month_results if r.get("clampedBy") == "SUELO")
-        total_days = len(month_results)
+    comisiones_pagadas = sum(
+        c["rev"] - c["net_rev"] for c in canales.values()
+    )
 
-        if diff < -20:
-            actions.append({
-                "month": MONTH_SHORT[m], "level": "crit", "icon": "🔴",
-                "text": f"{diff:+d}% vs mejor año. {t['ty_nights']}n vendidas vs {t.get('best_nights',0)}n. "
-                        f"Acción: bajar minStay o promoción.",
-            })
-        elif diff < -10 and avg_disp > 5:
-            actions.append({
-                "month": MONTH_SHORT[m], "level": "warn", "icon": "🟠",
-                "text": f"{diff:+d}% con {avg_disp:.0f}/9 libres. Vigilar 2 semanas.",
-            })
-        elif diff > 20 and suelo_days > total_days * 0.3:
-            actions.append({
-                "month": MONTH_SHORT[m], "level": "opp", "icon": "💰",
-                "text": f"+{diff}% (bien!), pero {suelo_days}/{total_days}d en suelo. Margen para subir.",
-            })
+    canal_items = []
+    for canal, datos in sorted(canales.items(), key=lambda x: -x[1]["rev"]):
+        pct = round(datos["rev"] / total_rev * 100)
+        adr = round(datos["rev"] / datos["nights"]) if datos["nights"] > 0 else 0
+        net_adr = round(datos["net_rev"] / datos["nights"]) if datos["nights"] > 0 else 0
+        color = "#27ae60" if canal == "direct" else "#2980b9" if canal == "booking" else "#8e44ad"
+        canal_items.append(
+            f'<span style="color:{color}"><strong>{canal.title()}</strong> {pct}% '
+            f'({datos["count"]}res, ADR {adr}€, neto <strong>{net_adr}€</strong>)</span>'
+        )
 
-    return actions
+    # Directas este año vs LY
+    direct_ty = canales.get("direct", {}).get("rev", 0)
+    direct_pct_ty = round(direct_ty / total_rev * 100) if total_rev > 0 else 0
+
+    return f"""
+    <div style="background:white;border-radius:10px;padding:14px 20px;margin-bottom:16px;
+                box-shadow:0 2px 8px rgba(0,0,0,0.06);font-size:0.88em">
+        <strong>Canal mix {today.year}:</strong>
+        {' · '.join(canal_items)}
+        {'<span style="color:#27ae60"> — 📈 Directas ' + str(direct_pct_ty) + '%</span>' if direct_pct_ty > 0 else ''}
+        <span style="color:#e74c3c"> — Comisiones pagadas: <strong>{comisiones_pagadas:,.0f}€</strong></span>
+    </div>"""
 
 
 # ══════════════════════════════════════════
-# DATE ROWS — compact + expandable
+# TABLA DE FECHAS — Compacta con expansión
 # ══════════════════════════════════════════
 
-def _row_compact(r):
-    disp = r.get("disponibles", 0)
-    precio = r.get("precioFinal", 0)
-    genius = r.get("precioGenius", 0)
-    clamped = r.get("clampedBy", "")
-    f_total = r.get("fTotal", 1.0)
-    event = r.get("eventName", "")
-    min_stay = r.get("minStay", 0)
-    dow = date.fromisoformat(r["date"]).weekday()
-    day_short = ["L", "M", "X", "J", "V", "S", "D"][dow]
+def _build_tabla_fechas(results, month_filter=None):
+    """Tabla compacta de fechas. Clic en fila = expandir detalle."""
+    from rms.utils import parse_date
 
-    if disp == 0:
-        bg = "#e8e8e8"
-    elif clamped == "TECHO":
-        bg = "#fce4ec"
-    elif clamped == "SUELO":
-        bg = "#fff8e1"
-    elif f_total > 1.02:
-        bg = "#e8f5e9"
-    elif f_total < 0.98:
-        bg = "#fbe9e7"
-    else:
-        bg = "#fff"
+    filas = ""
+    idx = 0
 
-    notes = []
-    if clamped:
-        notes.append(clamped)
-    if abs(f_total - 1.0) > 0.02:
-        notes.append(f"×{f_total:.2f}")
-    if event:
-        notes.append(event[:18])
-    if r.get("boostUA", 1.0) > 1.0:
-        notes.append(f"boost+{round((r['boostUA']-1)*100)}%")
-    if r.get("gapOverride"):
-        notes.append("GAP")
-    note_str = " · ".join(notes)
+    for r in results:
+        m = int(r["date"][5:7])
+        if month_filter and m != month_filter:
+            continue
 
-    return (f"<tr style='background:{bg}' class='clickrow'>"
-            f"<td>{r['date'][8:]}{day_short}</td><td class='r'>{disp}</td>"
-            f"<td class='r'><strong>{precio}€</strong></td><td class='r'>{genius}€</td>"
-            f"<td class='r'>{min_stay}n</td>"
-            f"<td class='note'>{note_str}</td></tr>")
+        d = parse_date(r["date"])
+        dow = DAY_NAMES.get(d.weekday(), "")
+        dow_full = DAY_NAMES_FULL.get(d.weekday(), "")
+        is_we = d.weekday() in (4, 5)
+
+        disp = r.get("disponibles", 0)
+        reservadas = r.get("reservadas", 0)
+        precio = r.get("precioFinal", 0)
+        genius = r.get("precioGenius", 0)
+        min_stay = r.get("minStay", 3)
+        clamped = r.get("clampedBy", "")
+        event_name = r.get("eventName", "")
+        days_out = r.get("daysOut", 0)
+        suelo = r.get("suelo", 0)
+        techo = r.get("techo", 0)
+        gap = r.get("gapOverride", False)
+        presion = r.get("presionTemporal", False)
+        vac = r.get("vacFactor", 1.0)
+
+        # Color de disponibilidad
+        if disp == 0:
+            disp_color = "#e74c3c"
+            disp_txt = "LLENO"
+        elif disp <= 2:
+            disp_color = "#e67e22"
+            disp_txt = str(disp)
+        elif disp <= 4:
+            disp_color = "#f39c12"
+            disp_txt = str(disp)
+        else:
+            disp_color = "#95a5a6"
+            disp_txt = str(disp)
+
+        # Badge de clamp
+        clamp_badge = ""
+        if clamped == "SUELO":
+            clamp_badge = '<span style="background:#3498db;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">SUELO</span>'
+        elif clamped == "TECHO":
+            clamp_badge = '<span style="background:#e74c3c;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">TECHO</span>'
+        elif clamped == "PROT":
+            clamp_badge = '<span style="background:#9b59b6;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">PROT</span>'
+
+        # Notas compactas
+        notas = []
+        if event_name:
+            notas.append(f"🎉 {event_name}")
+        if vac > 1.0:
+            notas.append(f"🏫 Vac+{round((vac-1)*100)}%")
+        if gap:
+            notas.append("🔧 Gap")
+        if presion:
+            notas.append("⏱️ Presión")
+
+        notas_txt = " · ".join(notas) if notas else ""
+
+        bg = "#fafafa" if idx % 2 == 0 else "white"
+        we_style = "font-weight:600;" if is_we else ""
+
+        # Detalle expandible
+        detalle = _build_detalle(r, dow_full)
+
+        filas += f"""
+        <tr style="background:{bg};cursor:pointer" onclick="toggleDetalle({idx})"
+            class="fila-fecha" data-mes="{m}">
+            <td style="padding:8px 10px;{we_style}color:#1a1a2e;white-space:nowrap">
+                {d.day}{dow}
+            </td>
+            <td style="padding:8px 10px;text-align:center;color:{disp_color};font-weight:600">
+                {disp_txt}
+            </td>
+            <td style="padding:8px 10px;text-align:right;font-weight:700;color:#1a1a2e">
+                {precio}€{clamp_badge}
+            </td>
+            <td style="padding:8px 10px;text-align:right;color:#666">
+                {genius}€
+            </td>
+            <td style="padding:8px 10px;text-align:center;color:#555">
+                {min_stay}n
+            </td>
+            <td style="padding:8px 10px;color:#666;font-size:0.85em">
+                {notas_txt}
+            </td>
+        </tr>
+        <tr id="detalle-{idx}" style="display:none;background:#f0f4f8">
+            <td colspan="6" style="padding:0">
+                {detalle}
+            </td>
+        </tr>"""
+        idx += 1
+
+    return f"""
+    <div style="background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+        <table style="width:100%;border-collapse:collapse;font-size:0.88em">
+            <thead>
+                <tr style="background:#2c3e50;color:white">
+                    <th style="padding:10px;text-align:left;font-weight:600">Día</th>
+                    <th style="padding:10px;text-align:center;font-weight:600">Disp</th>
+                    <th style="padding:10px;text-align:right;font-weight:600">Precio</th>
+                    <th style="padding:10px;text-align:right;font-weight:600">Genius</th>
+                    <th style="padding:10px;text-align:center;font-weight:600">Min</th>
+                    <th style="padding:10px;text-align:left;font-weight:600">Notas</th>
+                </tr>
+            </thead>
+            <tbody>{filas}</tbody>
+        </table>
+    </div>"""
 
 
-def _row_detail(r):
-    f_otb = r.get("fOTB", 1.0)
-    f_pickup = r.get("fPickup", 1.0)
-    f_pace = r.get("fPace", 1.0)
-    f_total = r.get("fTotal", 1.0)
-    f_ebsa = r.get("fEBSA", 1.0)
-    urgency = r.get("urgency", 1.0)
-    base_pub = r.get("basePub", 0)
+def _build_detalle(r, dow_full):
+    """Detalle expandido de una fecha — limpio y estructurado."""
+    from rms.utils import parse_date
+
+    d = parse_date(r["date"])
+    month = d.month
+
+    precio_neto = r.get("precioNeto", 0)
+    precio_final = r.get("precioFinal", 0)
+    precio_genius = r.get("precioGenius", 0)
     suelo = r.get("suelo", 0)
     techo = r.get("techo", 0)
-    occ_now = r.get("occNow", 0)
-    occ_exp = r.get("expectedOcc", 0)
-    neto = r.get("precioNeto", 0)
-    vac = r.get("vacFactor", 1.0)
-    boost = r.get("boostUA", 1.0)
     clamped = r.get("clampedBy", "")
+    days_out = r.get("daysOut", 0)
+    reservadas = r.get("reservadas", 0)
+    occ_now = reservadas / config.TOTAL_UNITS
+    occ_esperada = r.get("expectedOcc", 0)
+    pace_ratio = r.get("paceRatio", 1.0)
+    vac_factor = r.get("vacFactor", 1.0)
+    market_factor = r.get("marketFactor", 1.0)
+    unc_uplift = r.get("uncUplift", 1.0)
+    event_name = r.get("eventName", "")
+    event_factor = r.get("eventFactor", 1.0)
+    min_stay = r.get("minStay", 3)
+    min_stay_ground = r.get("minStayGround", min_stay)
+    gap_override = r.get("gapOverride", False)
+    los_razon = r.get("losRazon", "")
+    los_reduccion = r.get("losReduccion", 0)
+    media_vendida = r.get("mediaVendida", 0)
+    prot_level = r.get("protLevel", 0)
     suavizado = r.get("suavizado", "")
+    min_rev_applied = r.get("minRevApplied", False)
+    min_rev_per_night = r.get("minRevPerNight", 0)
+    last_minute = r.get("lastMinuteLevel", "")
+    presion = r.get("presionTemporal", False)
+    sc = r.get("seasonCode", "M")
 
-    parts = []
-    parts.append(f"Neto {neto}€ → ×{config.GENIUS_COMPENSATION} = {base_pub}€")
-    if boost > 1.0:
-        parts.append(f"Boost +{round((boost-1)*100)}%")
+    # Precio base Capa A
+    seg = r.get("segment", "")
+    ppd = config.SEGMENT_BASE.get(seg, {}).get("preciosPorDisp", {})
+    disp_lookup = max(1, config.TOTAL_UNITS - reservadas)
+    capa_a = ppd.get(disp_lookup)
+    if isinstance(capa_a, dict):
+        capa_a = capa_a.get("precio", "?")
 
-    mp = []
-    if abs(f_otb - 1.0) > 0.005:
-        mp.append(f"OTB×{f_otb:.2f}({round(occ_now*100)}%vs{round(occ_exp*100)}%)")
-    if abs(f_pickup - 1.0) > 0.005:
-        mp.append(f"Pick×{f_pickup:.2f}")
-    if abs(f_pace - 1.0) > 0.005:
-        mp.append(f"Pace×{f_pace:.2f}")
-    if urgency > 1.0:
-        mp.append(f"Urg×{urgency:.1f}")
-    if mp:
-        parts.append(" ".join(mp) + f" → ×{f_total:.2f}")
+    # Construir cadena de cálculo
+    pasos = []
+    pasos.append(f"Capa A ({seg}, {disp_lookup} libre{'s' if disp_lookup != 1 else ''}): <strong>{capa_a}€</strong>")
 
-    if f_ebsa > 1.01:
-        parts.append(f"EBSA+{round((f_ebsa-1)*100)}%")
-    if vac > 1.0:
-        parts.append(f"Vac+{round((vac-1)*100)}%")
-    if clamped:
-        parts.append(f"{clamped}({suelo}–{techo}€)")
-    if suavizado:
-        parts.append(suavizado)
+    if presion:
+        pasos.append(f"⏱️ Presión temporal (retrasado vs curva): bajada proactiva")
 
-    detail = " | ".join(parts)
-    return f"<tr class='detail'><td colspan='6'><small>{detail}</small></td></tr>"
+    if pace_ratio != 1.0:
+        direction = "adelantado" if pace_ratio > 1.0 else "retrasado"
+        pct = abs(round((pace_ratio - 1.0) * 100))
+        occ_pct = round(occ_now * 100)
+        exp_pct = round(occ_esperada * 100)
+        pasos.append(f"Pace: {occ_pct}% OTB vs {exp_pct}% esperado → {pct}% {direction} → ×{pace_ratio:.2f}")
+
+    if vac_factor > 1.0:
+        pasos.append(f"🏫 Vacaciones escolares DE/NL/UK: ×{vac_factor:.2f} (+{round((vac_factor-1)*100)}%)")
+
+    if market_factor != 1.0:
+        pasos.append(f"🌍 Mercado {'caliente' if market_factor > 1 else 'frío'}: ×{market_factor:.2f}")
+
+    if event_name and event_factor > 1.0:
+        pasos.append(f"🎉 {event_name}: ×{event_factor:.2f} (+{round((event_factor-1)*100)}%)")
+
+    if unc_uplift > 1.0:
+        pasos.append(f"📈 Demanda no restringida (escasez): ×{unc_uplift:.2f} (+{round((unc_uplift-1)*100)}%)")
+
+    genius_calculado = round(precio_neto * config.GENIUS_COMPENSATION)
+    pasos.append(f"Neto {precio_neto}€ × {config.GENIUS_COMPENSATION} Genius = <strong>{genius_calculado}€</strong>")
+
+    # Guardarraíles
+    guardarrail = ""
+    if clamped == "SUELO":
+        guardarrail = f'<span style="background:#3498db;color:white;padding:2px 8px;border-radius:3px">SUELO {suelo}€</span> (cálculo daba {genius_calculado}€)'
+    elif clamped == "TECHO":
+        guardarrail = f'<span style="background:#e74c3c;color:white;padding:2px 8px;border-radius:3px">TECHO {techo}€</span>'
+    elif clamped == "PROT":
+        min_prot = round(media_vendida * prot_level)
+        guardarrail = f'🛡️ Protección: reservas existentes a {round(media_vendida)}€ → mínimo {min_prot}€'
+    elif min_rev_applied:
+        guardarrail = f'💰 Revenue mínimo: {min_rev_per_night}€/noche'
+    elif suavizado:
+        textos = {"BAJADO": "📉 Suavizado -12% vs ayer", "SUBIDO": "📈 Suavizado +12% vs ayer",
+                  "MONO_UP": "📈 Monotonía: precio igualado al alza", "MONO_DN": "📉 Monotonía: precio igualado a la baja"}
+        guardarrail = textos.get(suavizado, suavizado)
+    if last_minute:
+        guardarrail += f' · ⏰ {last_minute}'
+
+    # MinStay
+    if min_stay == min_stay_ground:
+        minstay_txt = f"{min_stay} noches"
+    else:
+        minstay_txt = f"Upper: {min_stay}n · Ground: {min_stay_ground}n"
+    if gap_override:
+        minstay_txt += " <span style='color:#8e44ad'>(gap)</span>"
+    if los_reduccion > 0:
+        minstay_txt += f" <span style='color:#e67e22'>(reducido, premium ×{r.get('losPremium',1):.2f})</span>"
+
+    pasos_html = "".join(f'<div style="padding:3px 0;border-bottom:1px solid #e8ecf0;font-size:0.87em">{p}</div>' for p in pasos)
+
+    return f"""
+    <div style="padding:14px 20px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+            <div style="font-size:0.78em;color:#888;font-weight:600;letter-spacing:0.05em;margin-bottom:6px">CÁLCULO</div>
+            {pasos_html}
+            {'<div style="margin-top:8px;font-size:0.87em">' + guardarrail + '</div>' if guardarrail else ''}
+        </div>
+        <div>
+            <div style="font-size:0.78em;color:#888;font-weight:600;letter-spacing:0.05em;margin-bottom:6px">RESULTADO</div>
+            <div style="font-size:1.6em;font-weight:800;color:#1a1a2e">{precio_final}€</div>
+            <div style="color:#888;font-size:0.9em">Genius: {precio_genius}€</div>
+            <div style="margin-top:8px;font-size:0.87em;color:#555">MinStay: {minstay_txt}</div>
+            <div style="margin-top:4px;font-size:0.82em;color:#888">Suelo {suelo}€ · Techo {techo}€ · {days_out}d vista</div>
+            <div style="margin-top:4px;font-size:0.82em;color:#888">{round(occ_now*100)}% ocupado · {round(occ_esperada*100)}% esperado</div>
+        </div>
+    </div>"""
 
 
 # ══════════════════════════════════════════
-# MAIN HTML
+# MAIN: generar_explicacion_html
 # ══════════════════════════════════════════
 
 def generar_explicacion_html(results, month_filter=None, date_filter=None):
-    tracker = _get_revenue_tracker()
+    today = date.today()
 
-    html = """<!DOCTYPE html>
-<html lang="es"><head>
+    # Filtrar si hay date_filter
+    if date_filter:
+        results_filtrados = [r for r in results if r["date"] == date_filter]
+    elif month_filter:
+        results_filtrados = results  # Tabla muestra todos los meses, filtra con JS
+    else:
+        results_filtrados = results
+
+    # Dashboard siempre con todos los meses
+    dashboard = _build_dashboard(results)
+
+    # Mes activo para la tabla
+    mes_activo = month_filter or today.month
+
+    # Navegación de meses
+    nav_items = '<a href="/explicacion" style="margin:0 4px;color:#1a1a2e;text-decoration:none;padding:4px 8px;border-radius:4px' + (';background:#1a1a2e;color:white' if not month_filter else '') + '">Todo</a>'
+    for m in range(1, 13):
+        active_style = ";background:#1a1a2e;color:white" if month_filter == m else ""
+        nav_items += f'<a href="/explicacion?month={m}" style="margin:0 4px;color:#1a1a2e;text-decoration:none;padding:4px 8px;border-radius:4px{active_style}">{MONTH_NAMES[m]}</a>'
+
+    # Tabla de fechas del mes activo
+    tabla_fechas = _build_tabla_fechas(results, month_filter)
+
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RMS Estanques v7.3</title>
+<title>RMS Estanques v7.4</title>
 <style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-       max-width: 900px; margin: 0 auto; padding: 10px; background: #f5f5f5; color: #333; font-size: 14px; }
-h1 { font-size: 1.2em; color: #1a1a2e; margin-bottom: 10px; }
-
-.dash { background: white; border-radius: 10px; padding: 14px; margin-bottom: 14px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-.dash.warn { background: #fff3cd; padding: 20px; }
-.ytd { padding: 8px 12px; border-radius: 6px; background: #f8f9fa; margin-bottom: 10px; font-size: 1em; }
-
-.grid { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-.grid th { background: #1a1a2e; color: white; padding: 5px 6px; text-align: left; font-weight: 600; }
-.grid td { padding: 4px 6px; border-bottom: 1px solid #e8e8e8; }
-.grid .r { text-align: right; font-variant-numeric: tabular-nums; }
-.grid small { color: #888; }
-
-.actions { margin-top: 10px; }
-.act { padding: 7px 10px; border-radius: 5px; margin: 5px 0; font-size: 0.88em; line-height: 1.4; }
-.act.crit { background: #fde8e8; border-left: 3px solid #c0392b; }
-.act.warn { background: #fff3e0; border-left: 3px solid #e67e22; }
-.act.opp { background: #e8f5e9; border-left: 3px solid #2d7a3a; }
-
-.nav { background: white; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px;
-       box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-size: 0.85em; }
-.nav a { margin: 0 5px; color: #0f3460; text-decoration: none; font-weight: 600; }
-.nav a:hover { text-decoration: underline; }
-.nav a.active { color: #e94560; }
-
-.dates { background: white; border-radius: 8px; overflow: hidden;
-         box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-top: 10px; }
-.dates h2 { font-size: 0.95em; padding: 8px 12px; background: #1a1a2e; color: white; }
-.dtable { width: 100%; border-collapse: collapse; font-size: 0.82em; }
-.dtable th { background: #f0f4f8; padding: 4px 6px; text-align: left; font-weight: 600;
-             position: sticky; top: 0; }
-.dtable td { padding: 3px 6px; border-bottom: 1px solid #f0f0f0; }
-.dtable .r { text-align: right; font-variant-numeric: tabular-nums; }
-.dtable .note { color: #666; font-size: 0.88em; }
-.clickrow { cursor: pointer; }
-.clickrow:hover { background: #f0f8ff !important; }
-.detail td { background: #f8f9fa; cursor: default; padding: 5px 10px; }
-.detail small { color: #555; line-height: 1.5; }
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    background: #f0f2f5;
+    color: #333;
+    min-height: 100vh;
+  }}
+  .header {{
+    background: #1a1a2e;
+    color: white;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }}
+  .header h1 {{ font-size: 1.1em; font-weight: 700; letter-spacing: -0.02em; }}
+  .header-links a {{ color: rgba(255,255,255,0.7); text-decoration: none; margin-left: 16px; font-size: 0.85em; }}
+  .header-links a:hover {{ color: white; }}
+  .nav {{
+    background: white;
+    padding: 10px 24px;
+    border-bottom: 1px solid #e8ecf0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
+  }}
+  .content {{ max-width: 1100px; margin: 0 auto; padding: 20px 16px; }}
+  .section-title {{
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #888;
+    margin: 20px 0 10px 0;
+  }}
+  tbody tr.fila-fecha:hover td {{ background: #e8f4fd !important; }}
+  tbody tr.fila-mes:hover td {{ background: #f0f7ff !important; }}
+  .fila-fecha td, .fila-mes td {{ transition: background 0.1s; }}
 </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>RMS Estanques v7.4</h1>
+  <div class="header-links">
+    <a href="/run">↺ Recalcular</a>
+    <a href="/prices/compare">Tabla</a>
+    <a href="/revenue">Revenue</a>
+    <a href="/health">Estado</a>
+  </div>
+</div>
+
+<div class="nav">
+  {nav_items}
+</div>
+
+<div class="content">
+
+  <div class="section-title">Dashboard</div>
+  {dashboard}
+
+  <div class="section-title">
+    {'Todos los meses' if not month_filter else MONTH_NAMES_FULL.get(month_filter, '')} — {len([r for r in results if not month_filter or int(r['date'][5:7]) == month_filter])} días
+  </div>
+  {tabla_fechas}
+
+</div>
+
 <script>
-document.addEventListener('click', function(e) {
-    var row = e.target.closest('.clickrow');
-    if (!row) return;
-    var detail = row.nextElementSibling;
-    if (detail && detail.classList.contains('detail')) {
-        detail.style.display = detail.style.display === 'table-row' ? 'none' : 'table-row';
-    }
-});
+function toggleDetalle(idx) {{
+  const el = document.getElementById('detalle-' + idx);
+  if (el) el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
+}}
+
+function filtrarMes(m) {{
+  window.location.href = '/explicacion?month=' + m;
+}}
 </script>
-</head><body>
-<h1>RMS Estanques v7.3</h1>
-"""
 
-    # Nav
-    html += "<div class='nav'>"
-    html += "<a href='/explicacion'>Todo</a>"
-    for m in range(1, 13):
-        active = " class='active'" if month_filter == m else ""
-        html += f" <a href='/explicacion?month={m}'{active}>{MONTH_SHORT[m]}</a>"
-    html += "</div>"
+</body>
+</html>"""
 
-    # Dashboard
-    html += _build_dashboard(tracker, results)
-
-    # Filter
-    filtered = results
-    if date_filter:
-        filtered = [r for r in results if r["date"] == date_filter]
-    elif month_filter:
-        filtered = [r for r in results if int(r["date"][5:7]) == month_filter]
-
-    # Date table
-    if filtered:
-        current_month = None
-        for r in filtered:
-            m = int(r["date"][5:7])
-            if m != current_month:
-                if current_month is not None:
-                    html += "</table></div>"
-                current_month = m
-                html += f"<div class='dates'><h2>{MONTH_NAMES[m].capitalize()} {r['date'][:4]}</h2>"
-                html += "<table class='dtable'>"
-                html += "<tr><th>Día</th><th class='r'>Disp</th><th class='r'>Precio</th>"
-                html += "<th class='r'>Genius</th><th class='r'>Min</th><th>Notas</th></tr>"
-
-            html += _row_compact(r)
-            html += _row_detail(r)
-
-        html += "</table></div>"
-    else:
-        html += "<p style='padding:20px'>No hay datos. <a href='/run'>/run</a></p>"
-
-    html += "</body></html>"
     return html
