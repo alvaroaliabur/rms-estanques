@@ -163,7 +163,29 @@ def explicar_fecha(r):
     lines.append(f"<p><strong>③ Precio calculado:</strong> "
                  f"Neto {precio_neto}€ × Genius {config.GENIUS_COMPENSATION} = <strong>{genius_price}€</strong></p>")
 
-    # ── 5. Guardrails ──
+    # ── 4b. Claude API adjustment ──
+    # If precioFinal differs significantly from the calculated price after all guardrails,
+    # it means Claude API made an adjustment
+    claude_adjusted = False
+    # Estimate what price would be without Claude: apply guardrails to genius_price
+    estimated_no_claude = genius_price
+    if estimated_no_claude < suelo:
+        estimated_no_claude = suelo
+    if estimated_no_claude > techo:
+        estimated_no_claude = techo
+    if min_rev_applied:
+        estimated_no_claude = max(estimated_no_claude, min_rev_per_night)
+    
+    # If final price is notably different from estimated, Claude adjusted it
+    if abs(precio_final - estimated_no_claude) > 5 and not suavizado:
+        claude_diff = precio_final - estimated_no_claude
+        if claude_diff > 0:
+            lines.append(f"<p><strong>🧠 Claude API:</strong> Subió el precio <strong>+{claude_diff}€</strong> "
+                        f"(de {estimated_no_claude}€ a {precio_final}€) por escasez y demanda fuerte.</p>")
+        elif claude_diff < 0:
+            lines.append(f"<p><strong>🧠 Claude API:</strong> Bajó el precio <strong>{claude_diff}€</strong> "
+                        f"(de {estimated_no_claude}€ a {precio_final}€).</p>")
+        claude_adjusted = True
     guardrail_lines = []
 
     if clamped == "SUELO":
