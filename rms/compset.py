@@ -266,7 +266,9 @@ def is_pricing_peer(name):
 
 def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
     """
-    Ejecuta scrape en Apify. Por defecto scrapea SOLO pricing peers.
+    Ejecuta scrape en Apify usando startUrls (URLs directas de hotel).
+    NO usa 'search' — eso devuelve búsqueda genérica de la zona.
+    Por defecto scrapea SOLO pricing peers.
     Para market reference, pasar urls=get_all_urls().
     """
     if not apify_token:
@@ -277,16 +279,19 @@ def run_apify_scrape(apify_token, check_in, check_out, adults=2, urls=None):
         urls = get_all_peer_urls()
 
     cfg = APIFY_CONFIG
+
+    # Construir startUrls: cada URL de hotel como objeto {url: "..."}
+    start_urls = [{"url": u} for u in urls]
+
     input_data = {
-        "search": "Colònia de Sant Jordi",
+        "startUrls": start_urls,
         "checkIn": check_in,
         "checkOut": check_out,
         "adults": adults,
         "rooms": 1,
         "currency": "EUR",
         "language": "es",
-        "propertyUrls": urls,
-        "maxResults": len(urls) + 5,
+        "maxItems": len(urls),
     }
 
     try:
