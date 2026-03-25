@@ -1,11 +1,15 @@
 """
-OTB module — Read OTB, pickup, pace, fill curves, booking parsing.
-Replaces: readOTB_, calcularPickup_, calcularPace_, buildFillCurves_,
-          fetchHistoricalBookings_, esCancelada_, esActiva_, parsearReserva_,
-          guardarSnapshotOTB_, readCurrentPrices_, getExpectedOcc_
+OTB module — v7.2
+CHANGES:
+  - read_otb_by_type(): Returns OTB split by room type (upper vs ground)
+  - Snapshots moved from /tmp to /data/ (Railway persistent volume)
+  - Snapshot fallback to /tmp if /data/ not mounted
+  - save_otb_snapshot called automatically in read_otb
 """
 
 import logging
+import json
+import os
 from datetime import date, timedelta
 from rms import config
 from rms.beds24 import api_get, api_get_all
@@ -127,19 +131,93 @@ def read_otb():
             d += timedelta(days=1)
 
     log.info(f"  OTB: {len(otb)} fechas")
+
+    # Auto-save snapshot for pickup
+    try:
+        save_otb_snapshot(otb)
+    except Exception as e:
+        log.warning(f"  Snapshot save error: {e}")
+
     return otb
 
 
+def read_otb_by_type():
+    """
+    Read OTB split by room type.
+    Returns: (otb_total, otb_by_type)
+      otb_total: {date_str: total_units_booked}  (same as read_otb)
+      otb_by_type: {"upper": {date_str: units}, "ground": {date_str: units}}
+    """
+    today = date.today()
+    end = today + timedelta(days=config.PRICING_HORIZON)
+
+    all_bks = api_get_all("bookings", {
+        "arrivalFrom": fmt(today),
+        "departureTo": fmt(end),
+        "propertyId": config.PROPERTY_ID,
+    })
+
+    active_bks = api_get("bookings", {
+        "departureFrom": fmt(today),
+        "arrivalTo": fmt(today),
+        "propertyId": config.PROPERTY_ID,
+        "limit": 100,
+    })
+    if active_bks:
+        all_bks.extend(active_bks)
+
+    otb_total = {}
+    otb_upper = {}
+    otb_ground = {}
+    seen = set()
+
+    for b in all_bks:
+        if not b.get("arrival") or not b.get("departure"):
+            continue
+        if es_cancelada(b):
+            continue
+        bid = b.get("id")
+        if bid in seen:
+            continue
+        seen.add(bid)
+
+        ci = parse_date(b["arrival"])
+        co = parse_date(b["departure"])
+        units = b.get("roomQty", 1) or 1
+        room_id = b.get("roomId")
+
+        # Determine room type
+        if room_id == config.ROOM_GROUND:
+            target = otb_ground
+        else:
+            target = otb_upper
+
+        d = max(ci, today)
+        while d < co:
+            if d > end:
+                break
+            k = fmt(d)
+            otb_total[k] = otb_total.get(k, 0) + units
+            target[k] = target.get(k, 0) + units
+            d += timedelta(days=1)
+
+    log.info(f"  OTB by type: {len(otb_total)} fechas (upper: {sum(otb_upper.values())}, ground: {sum(otb_ground.values())} room-nights)")
+
+    try:
+        save_otb_snapshot(otb_total)
+    except Exception as e:
+        log.warning(f"  Snapshot save error: {e}")
+
+    return otb_total, {"upper": otb_upper, "ground": otb_ground}
+
+
 # ══════════════════════════════════════════
-# OTB SNAPSHOT (for pickup calculation)
+# OTB SNAPSHOT — Persistent storage
 # ══════════════════════════════════════════
 
-# In Python/Railway we store snapshots in a simple JSON file
-# or in PostgreSQL. For now, use a JSON file.
-import json
-import os
-
-SNAPSHOT_FILE = "/tmp/otb_snapshots.json"
+# Prefer /data/ (Railway volume) over /tmp/
+SNAPSHOT_DIR = "/data" if os.path.isdir("/data") else "/tmp"
+SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "otb_snapshots.json")
 
 
 def save_otb_snapshot(otb):
@@ -161,7 +239,7 @@ def _load_snapshots():
         try:
             with open(SNAPSHOT_FILE) as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return {}
 
@@ -202,7 +280,7 @@ def fetch_historical_bookings(years=None):
     """Fetch all active bookings for given years."""
     if years is None:
         years = config.HISTORICAL_YEARS
-
+    
     all_bookings = []
     for year in years:
         bks = api_get_all("bookings", {
@@ -258,7 +336,6 @@ def get_segment_key(d):
 def build_fill_curves(bookings):
     """Build fill curves from historical bookings."""
     stays_by_seg = {}
-
     for b in bookings:
         ci = b["ci"]
         co = b["co"]
@@ -318,7 +395,6 @@ def calc_pace(hist):
     pace = {}
     today = date.today()
     last_year = today.year - 1
-
     hist_ly = [b for b in hist if b["year"] == last_year]
     if not hist_ly:
         return pace
@@ -353,6 +429,7 @@ def read_current_prices():
 
     prices = {}
     seen = set()
+
     for b in all_bks:
         if es_cancelada(b):
             continue
