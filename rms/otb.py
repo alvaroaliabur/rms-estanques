@@ -1,12 +1,11 @@
 """
-OTB module — v7.5
-CHANGES vs v7.4:
-  - P1: Pickup persistente via Google Sheets — sobrevive redeploys de Railway
-    El problema: /data/ y /tmp/ se borran en cada deploy (128+ deploys).
-    Los snapshots OTB se perdían → fPick = 1.00 SIEMPRE.
-    Solución: guardar snapshots en una hoja de Google Sheets (ya tenemos SHEET_ID).
-    Fallback a /data/ si Sheets no disponible.
-  - calc_pace(): media ponderada 3 años (sin cambios vs v7.4)
+OTB module — v7.5.1
+CHANGES vs v7.5:
+  - P1: Pickup persistente via Railway Volume (/data/otb_snapshots.json)
+    Sin dependencia de Google Sheets ni credenciales externas.
+    Railway Volume montado en /data/ sobrevive redeploys.
+    Fallback a /tmp/ si /data/ no está montado (dev local).
+  - calc_pace(): media ponderada 3 años (sin cambios)
   - fetch_historical_bookings(): usa HISTORICAL_YEARS=[2023,2024,2025]
 """
 
@@ -192,212 +191,97 @@ def read_otb_by_type():
 # ══════════════════════════════════════════
 # OTB SNAPSHOT — PERSISTENT STORAGE
 #
-# v7.5: Triple-layer persistence:
-#   1. Google Sheets (survives redeploys, shared across instances)
-#   2. /data/ volume (Railway persistent if mounted)
-#   3. /tmp/ (last resort, lost on redeploy)
+# v7.5.1: Railway Volume (/data/) como única fuente de verdad.
 #
-# The key insight: Railway redeploys kill /tmp/ AND /data/ unless
-# you've explicitly mounted a volume. With 128+ deploys, snapshots
-# were ALWAYS lost. Google Sheets is the reliable store.
+# Setup en Railway (una sola vez):
+#   Dashboard → Service → Volumes → Add Volume → Mount path: /data
+#   El fichero /data/otb_snapshots.json sobrevive todos los redeploys.
+#
+# Sin Google Sheets, sin GOOGLE_CREDENTIALS_JSON, sin dependencias extra.
+# Fallback automático a /tmp/ si /data/ no está montado (dev local).
 # ══════════════════════════════════════════
 
-SNAPSHOT_DIR = "/data" if os.path.isdir("/data") else "/tmp"
-SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "otb_snapshots.json")
-
-# Google Sheets snapshot storage
-_SHEETS_SNAPSHOT_TAB = "otb_snapshots"
-_sheets_available = None  # Lazy check
-
-
-def _check_sheets_available():
-    """Check if we can use Google Sheets for persistence."""
-    global _sheets_available
-    if _sheets_available is not None:
-        return _sheets_available
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
-        if not creds_json:
-            _sheets_available = False
-            return False
-        _sheets_available = True
-        return True
-    except ImportError:
-        _sheets_available = False
-        return False
-
-
-def _get_sheets_client():
-    """Get authenticated gspread client."""
-    import gspread
-    from google.oauth2.service_account import Credentials
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
-    if not creds_json:
-        return None
-    import json as _json
-    creds_dict = _json.loads(creds_json)
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    return gspread.authorize(creds)
-
-
-def _save_snapshot_sheets(otb):
-    """Save OTB snapshot to Google Sheets."""
-    try:
-        client = _get_sheets_client()
-        if not client:
-            return False
-        sheet = client.open_by_key(config.SHEET_ID)
-
-        # Get or create the snapshots tab
+def _get_snapshot_path():
+    """
+    Returns the path for the snapshots JSON file.
+    Prefers /data/ (Railway Volume, persistent) over /tmp/ (volatile).
+    """
+    data_dir = "/data"
+    if os.path.isdir(data_dir):
         try:
-            tab = sheet.worksheet(_SHEETS_SNAPSHOT_TAB)
-        except Exception:
-            tab = sheet.add_worksheet(title=_SHEETS_SNAPSHOT_TAB, rows=20, cols=2)
-            tab.update_cell(1, 1, "snapshot_date")
-            tab.update_cell(1, 2, "otb_json")
-
-        today_str = fmt(date.today())
-
-        # Find existing row for today or append
-        all_rows = tab.get_all_values()
-        row_idx = None
-        for i, row in enumerate(all_rows):
-            if i == 0:
-                continue  # header
-            if len(row) >= 1 and row[0] == today_str:
-                row_idx = i + 1  # 1-indexed
-                break
-
-        otb_json = json.dumps(otb)
-        if row_idx:
-            tab.update_cell(row_idx, 2, otb_json)
-        else:
-            tab.append_row([today_str, otb_json])
-
-        # Clean old snapshots (keep last 14 days)
-        cutoff = fmt(date.today() - timedelta(days=14))
-        rows_to_delete = []
-        for i, row in enumerate(all_rows):
-            if i == 0:
-                continue
-            if len(row) >= 1 and row[0] < cutoff:
-                rows_to_delete.append(i + 1)
-        # Delete from bottom up to preserve indices
-        for row_idx in reversed(rows_to_delete):
-            try:
-                tab.delete_rows(row_idx)
-            except Exception:
-                pass
-
-        log.info(f"  📊 Snapshot guardado en Google Sheets ({today_str})")
-        return True
-    except Exception as e:
-        log.warning(f"  Sheets snapshot save error: {e}")
-        return False
+            test_path = os.path.join(data_dir, ".write_test")
+            with open(test_path, "w") as f:
+                f.write("ok")
+            os.remove(test_path)
+            return os.path.join(data_dir, "otb_snapshots.json")
+        except OSError:
+            pass
+    return "/tmp/otb_snapshots.json"
 
 
-def _load_snapshots_sheets():
-    """Load all OTB snapshots from Google Sheets."""
-    try:
-        client = _get_sheets_client()
-        if not client:
-            return {}
-        sheet = client.open_by_key(config.SHEET_ID)
-        try:
-            tab = sheet.worksheet(_SHEETS_SNAPSHOT_TAB)
-        except Exception:
-            return {}
-
-        all_rows = tab.get_all_values()
-        snapshots = {}
-        for i, row in enumerate(all_rows):
-            if i == 0:
-                continue  # header
-            if len(row) >= 2 and row[0] and row[1]:
-                try:
-                    snapshots[row[0]] = json.loads(row[1])
-                except (json.JSONDecodeError, ValueError):
-                    pass
-
-        if snapshots:
-            log.info(f"  📊 Snapshots cargados de Sheets: {len(snapshots)} días")
-        return snapshots
-    except Exception as e:
-        log.debug(f"  Sheets snapshot load error: {e}")
-        return {}
-
-
-def save_otb_snapshot(otb):
-    """Save today's OTB snapshot. Tries Sheets first, then local file."""
-    today_str = fmt(date.today())
-
-    # 1. Try Google Sheets (persistent across redeploys)
-    sheets_ok = False
-    if _check_sheets_available():
-        sheets_ok = _save_snapshot_sheets(otb)
-
-    # 2. Always save locally too (faster reads during same run)
-    snapshots = _load_snapshots_local()
-    snapshots[today_str] = otb
-    cutoff = fmt(date.today() - timedelta(days=14))
-    snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
-    try:
-        with open(SNAPSHOT_FILE, "w") as f:
-            json.dump(snapshots, f)
-    except Exception as e:
-        log.warning(f"  Local snapshot save error: {e}")
-
-    if not sheets_ok:
-        log.info(f"  💾 Snapshot guardado localmente ({today_str})")
+SNAPSHOT_FILE = _get_snapshot_path()
 
 
 def _load_snapshots_local():
-    """Load snapshots from local file."""
+    """Load OTB snapshots from disk."""
     if os.path.exists(SNAPSHOT_FILE):
         try:
             with open(SNAPSHOT_FILE) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"  Snapshot load error ({SNAPSHOT_FILE}): {e}")
     return {}
 
 
-def _load_snapshots():
-    """Load snapshots from best available source.
-    Priority: local (fast) → Sheets (persistent).
+def save_otb_snapshot(otb):
     """
-    # 1. Try local first (faster, works during same run)
-    local = _load_snapshots_local()
-    if local and len(local) >= 2:
-        return local
+    Save today's OTB snapshot to disk (atomic write).
+    /data/otb_snapshots.json persists across Railway redeploys if Volume is mounted.
+    Prunes snapshots older than 14 days automatically.
+    """
+    today_str = fmt(date.today())
 
-    # 2. If local is empty/insufficient, try Sheets
-    if _check_sheets_available():
-        sheets = _load_snapshots_sheets()
-        if sheets:
-            # Also cache locally for rest of this run
-            try:
-                with open(SNAPSHOT_FILE, "w") as f:
-                    json.dump(sheets, f)
-            except Exception:
-                pass
-            return sheets
+    snapshots = _load_snapshots_local()
+    snapshots[today_str] = otb
 
-    return local
+    # Prune entries older than 14 days
+    cutoff = fmt(date.today() - timedelta(days=14))
+    snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
+
+    try:
+        os.makedirs(os.path.dirname(SNAPSHOT_FILE), exist_ok=True)
+        # Atomic write: write to .tmp then rename — no corruption on crash/OOM
+        tmp_path = SNAPSHOT_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(snapshots, f)
+        os.replace(tmp_path, SNAPSHOT_FILE)
+
+        if SNAPSHOT_FILE.startswith("/data"):
+            storage_label = "📦 /data (Railway Volume — persistente)"
+        else:
+            storage_label = "⚠️  /tmp (volátil — monta Volume en Railway Dashboard)"
+        log.info(f"  💾 Snapshot OTB: {today_str} → {storage_label}")
+        log.info(f"     Snapshots en disco: {len(snapshots)} días (últimos 14)")
+    except Exception as e:
+        log.error(f"  ❌ Snapshot save FAILED ({SNAPSHOT_FILE}): {e}")
 
 
+def _load_snapshots():
+    """Load OTB snapshots from disk. Single source of truth: /data/ or /tmp/."""
+    snapshots = _load_snapshots_local()
+    if not snapshots:
+        log.warning(
+            "  ⚠️  No OTB snapshots en disco — fPick=1.0 hasta mañana. "
+            "Si persiste: verifica Railway Volume montado en /data."
+        )
+    return snapshots
 # ══════════════════════════════════════════
 # PICKUP
 # ══════════════════════════════════════════
 
 def calc_pickup(otb_actual):
     """Pickup = OTB hoy - OTB hace 7 días.
-    v7.5: Now reads from persistent Sheets storage → fPick ALIVE.
+    v7.5.1: Reads from /data/otb_snapshots.json (Railway Volume) → fPick ALIVE.
     """
     pickup = {}
     snapshots = _load_snapshots()
