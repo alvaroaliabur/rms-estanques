@@ -1,21 +1,22 @@
 """ 
-RMS Estanques v7.4 — Python/Railway Edition
+RMS Estanques v7.5 — Python/Railway Edition
 Main entry point — Flask server + APScheduler + webhook handler
 
-v7.4 CHANGES:
-  - Suelos calibrados desde ADR real del mejor año histórico
-  - Pace multi-año ponderado (2023/2024/2025)
-  - Urgency eliminado — presión temporal integrada en pricing
-  - Comp set adj desactivado en UA/A
-  - Apify desactivado — Booking Analytics es la fuente de verdad para peers
-  - Email mensual día 1: solicita datos Booking Analytics
+v7.5 CHANGES:
+  - P1: Pickup persistente via Google Sheets (sobrevive redeploys)
+  - P3: Suelos dinámicos por days_out (65-100% según distancia)
+  - P4: Feedback persistente via Sheets
+  - P6: Early bird para sep-oct abandonados
+  - Endpoint /source/<filename> para acceso al código en producción
+  - Version bump a v7.5
 """
 
 import os
 import sys
 import logging
+import inspect
 from datetime import datetime, date
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(
@@ -58,7 +59,7 @@ def run_full():
 
     start = datetime.now()
     log.info("══════════════════════════════════════════")
-    log.info("  RMS ESTANQUES v7.4 — Full Pricing Run")
+    log.info("  RMS ESTANQUES v7.5 — Full Pricing Run")
     log.info(f"  {start.strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("══════════════════════════════════════════")
 
@@ -79,10 +80,7 @@ def run_full():
         else:
             cargar_capa_a()
 
-        # Step 3: Comp Set — DESACTIVADO v7.4
-        # Apify no captura fiablemente los 6 peers específicos.
-        # Referencia de peer pricing → BOOKING_ANALYTICS en config.py
-        # Actualización manual mensual vía email del RMS (día 1 de cada mes).
+        # Step 3: Comp Set — DESACTIVADO v7.4+
         log.info("\n── STEP 3: Comp Set ──")
         log.info("  Apify desactivado — referencia: Booking Analytics (config.py)")
 
@@ -113,8 +111,8 @@ def run_full():
         events = build_events()
         log.info(f"  ✅ {len(events)} eventos cargados")
 
-        # Step 6: Calculate prices v7.4
-        log.info("\n── STEP 6: Calcular precios v7.4 ──")
+        # Step 6: Calculate prices v7.5
+        log.info("\n── STEP 6: Calcular precios v7.5 ──")
         results = calcular_precios_v7(otb, events, otb_by_type=otb_by_type)
         log.info(f"  ✅ {len(results)} días calculados")
 
@@ -174,7 +172,7 @@ def run_full():
         _last_claude = claude_result
 
         elapsed = (datetime.now() - start).total_seconds()
-        log.info(f"\n✅ RMS v7.4 completado en {elapsed:.1f}s")
+        log.info(f"\n✅ RMS v7.5 completado en {elapsed:.1f}s")
 
     except Exception as e:
         log.error(f"❌ Error fatal: {e}", exc_info=True)
@@ -230,6 +228,11 @@ def audit_results(results):
         if mult_active < 10:
             warnings.append(f"Solo {mult_active} días con multiplicadores activos")
 
+        # v7.5: warn if pickup is dead
+        pickup_active = sum(1 for r in results if r.get("fPickup", 1.0) != 1.0)
+        if pickup_active == 0:
+            warnings.append("⚠️ fPickup=1.0 en TODOS los días — snapshots perdidos?")
+
     return {"ok": ok, "alertas": alertas, "warnings": warnings}
 
 
@@ -261,7 +264,7 @@ def health():
     next_run = str(scheduler_job.next_run_time) if scheduler_job else "not scheduled"
     return jsonify({
         "status": "ok",
-        "service": "RMS Estanques v7.4",
+        "service": "RMS Estanques v7.5",
         "next_run": next_run,
         "run_in_progress": _run_in_progress,
     })
@@ -286,7 +289,7 @@ def prices_compare():
     header = (f"{'Fecha':<11}| {'Disp':>4} | {'Precio':>6} | {'Genius':>6} | "
               f"{'Suelo':>5} | {'Techo':>5} | {'Neto':>5} | "
               f"{'fOTB':>5} | {'fPick':>5} | {'fPace':>5} | {'fTot':>5} | "
-              f"{'EBSA':>5} | {'Boost':>5} | {'Clamp':>5} | {'MinSt':>5} | {'Vac':>4}")
+              f"{'FlrF':>4} | {'Clamp':>5} | {'MinSt':>5} | {'Vac':>4} | {'EB':>2}")
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -295,12 +298,13 @@ def prices_compare():
         if month < 4 or month > 10:
             continue
 
+        eb = "Y" if r.get("earlyBird") else ""
         lines.append(
             f"{r['date']:<11}| {r['disponibles']:>4} | {r['precioFinal']:>4}€ | {r['precioGenius']:>4}€ | "
             f"{r.get('suelo',''):>5} | {r.get('techo',''):>5} | {r.get('precioNeto',''):>5} | "
             f"{r.get('fOTB',1.0):>5.2f} | {r.get('fPickup',1.0):>5.2f} | {r.get('fPace',1.0):>5.2f} | {r.get('fTotal',1.0):>5.2f} | "
-            f"{r.get('fEBSA',1.0):>5.2f} | {r.get('boostUA',1.0):>5.2f} | "
-            f"{r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | {r.get('vacFactor',1.0):>4.2f}"
+            f"{r.get('floorFactor',1.0):>4.2f} | "
+            f"{r.get('clampedBy',''):>5} | {r.get('minStay',''):>5} | {r.get('vacFactor',1.0):>4.2f} | {eb:>2}"
         )
 
     return "<pre>" + "\n".join(lines) + "</pre>"
@@ -351,6 +355,70 @@ def market_test():
                         "num_months": 6}, timeout=15)
     results["occ_district"] = r2.json() if r2.status_code == 200 else {"status": r2.status_code}
     return jsonify(results)
+
+
+# ══════════════════════════════════════════
+# /source/<filename> — Acceso al código fuente en producción
+# Resuelve el problema del CDN de GitHub cacheando versiones viejas.
+# Protegido con token opcional (SOURCE_TOKEN env var).
+# ══════════════════════════════════════════
+
+SOURCE_TOKEN = os.getenv("SOURCE_TOKEN", "")
+
+# Map of allowed filenames to module references
+_SOURCE_MAP = {
+    "main": None,  # Special: read this file directly
+    "config": "rms.config",
+    "pricing": "rms.pricing",
+    "otb": "rms.otb",
+    "compset": "rms.compset",
+    "capa_a": "rms.capa_a",
+    "revenue": "rms.revenue",
+    "apply": "rms.apply",
+    "alerts": "rms.alerts",
+    "beds24": "rms.beds24",
+    "events": "rms.events",
+    "vacaciones": "rms.vacaciones",
+    "los": "rms.los",
+    "explicacion": "rms.explicacion",
+    "email_report": "rms.email_report",
+    "market_intelligence": "rms.market_intelligence",
+    "claude_api": "rms.claude_api",
+    "utils": "rms.utils",
+}
+
+
+@app.route("/source")
+def source_index():
+    """List available source files."""
+    if SOURCE_TOKEN and request.args.get("token") != SOURCE_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    return jsonify({"files": sorted(_SOURCE_MAP.keys())})
+
+
+@app.route("/source/<filename>")
+def source_file(filename):
+    """Return source code of a module. No CDN cache issues."""
+    if SOURCE_TOKEN and request.args.get("token") != SOURCE_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if filename not in _SOURCE_MAP:
+        return jsonify({"error": f"Unknown file: {filename}", "available": sorted(_SOURCE_MAP.keys())}), 404
+
+    try:
+        if filename == "main":
+            # Read this file
+            with open(__file__, "r") as f:
+                source = f.read()
+        else:
+            module_name = _SOURCE_MAP[filename]
+            import importlib
+            mod = importlib.import_module(module_name)
+            source = inspect.getsource(mod)
+
+        return Response(source, mimetype="text/plain")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ══════════════════════════════════════════
