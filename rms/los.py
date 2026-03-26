@@ -10,6 +10,9 @@ CHANGES:
 from datetime import date, timedelta
 from rms import config
 from rms.utils import fmt, parse_date, get_month
+import logging
+
+log = logging.getLogger(__name__)
 
 
 def get_min_stay_dinamico(fecha, occ_now, days_out, season_code, expected_occ, disponibles):
@@ -211,9 +214,14 @@ def _detect_gaps_upper(gaps, otb_upper, today, horizon):
 def _detect_gaps_ground(gaps, otb_ground, today, horizon):
     """
     Detect gaps in ground floor (1 unit).
-    
-    Since it's 1 unit, any free stretch is the actual gap.
+
+    Since it's 1 unit, any free stretch between two bookings is the actual gap.
     Ground floor has independent minStay (can be lower than upper).
+
+    v7.6 fix: Only treat a free stretch as a GAP if it is surrounded by
+    bookings on both sides (day before AND day after the stretch are booked).
+    Without this, long free stretches (normal availability) were treated as
+    gaps and received minStay=5, blocking legitimate short bookings.
     """
     GROUND_UNITS = 1
     gf_cfg = config.GROUND_FLOOR_LOS or {}
@@ -232,7 +240,7 @@ def _detect_gaps_ground(gaps, otb_ground, today, horizon):
 
         # Count consecutive free nights for ground floor
         gap_length = 0
-        for gdi in range(14):  # Ground can have longer gaps
+        for gdi in range(14):
             gd = today + timedelta(days=di + gdi)
             gd_str = fmt(gd)
             gd_disp = GROUND_UNITS - otb_ground.get(gd_str, 0)
@@ -241,9 +249,25 @@ def _detect_gaps_ground(gaps, otb_ground, today, horizon):
             else:
                 break
 
+        # v7.6: Only act if this is a TRUE GAP — surrounded by bookings.
+        # Check day before AND day after the free stretch.
+        day_before = fmt(today + timedelta(days=max(0, di - 1)))
+        day_after = fmt(today + timedelta(days=di + gap_length))
+        booked_before = otb_ground.get(day_before, 0) >= 1
+        booked_after = otb_ground.get(day_after, 0) >= 1
+
+        # Also accept gaps that start today (no day before to check)
+        starts_today = (di == 0)
+
+        is_real_gap = (booked_before or starts_today) and booked_after
+
+        if not is_real_gap:
+            # Normal availability — skip, don't set restrictive minStay
+            di += gap_length if gap_length > 0 else 1
+            continue
+
         if gap_length < 2:
             # BUSINESS RULE: never accept 1-night stays anywhere.
-            # Block both room types with minStay=9.
             gaps[date_str] = {
                 "gapLength": 1,
                 "daysOut": di,
@@ -263,25 +287,24 @@ def _detect_gaps_ground(gaps, otb_ground, today, horizon):
         default_ms = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
         # Ground floor: minStay = gap_length always.
-        # The gap IS the constraint — never set minStay > gap_length
-        # or the gap becomes unsellable.
         if gap_length < default_ms:
             min_stay_gap = max(gf_absolute_min, gap_length)
             premium_gap = 1.18 if gap_length <= 2 else 1.10
         else:
-            # Gap fits default or longer — use default (not default-1)
             min_stay_gap = max(gf_absolute_min, default_ms)
             premium_gap = 1.05
 
-        # Only add to gaps dict if it improves on existing entry
-        # (upper floor might have already set a gap for this date)
-        # Fill ALL days of the gap for ground floor too.
+        log.debug(
+            f"  Gap ground: {date_str} gap={gap_length}n "
+            f"minStay={min_stay_gap} season={season_code} "
+            f"surrounded={is_real_gap}"
+        )
+
         for gdi in range(gap_length):
             gd = today + timedelta(days=di + gdi)
             gd_str = fmt(gd)
             existing = gaps.get(gd_str)
             if existing:
-                # Merge: keep upper info, add ground info
                 existing["minStayGapGround"] = min_stay_gap
                 existing["premiumGapGround"] = premium_gap
                 existing["gapLengthGround"] = gap_length
