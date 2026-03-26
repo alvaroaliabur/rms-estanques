@@ -49,13 +49,14 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
     """
     Slots abiertos según la mínima estancia REAL del día.
 
-    Beds24 Daily Price Rules tienen min/max stay por tarifa:
-      Standard = 1-3 noches, 4N = 4 noches, 5N = 5, 6N = 6, 7N = 7+
+    Beds24 Daily Price Rules:
+      Standard (price1) = 1-3N, 4N (price5) = 4N, 5N (price4) = 5N,
+      6N (price3) = 6N, Semanal (price10) = 7N+
 
     Regla completa:
-      min_stay=2 → Standard solo (huésped busca 2-3N, no aplican 4N+)
-      min_stay=3 → Standard + 4N + 5N + 6N + 7N (todo abierto)
-      min_stay=4 → 4N + 5N + 6N + 7N  (Standard cerrada)
+      min_stay=2 → Standard solo
+      min_stay=3 → Standard + 4N + 5N + 6N + 7N
+      min_stay=4 → 4N + 5N + 6N + 7N
       min_stay=5 → 5N + 6N + 7N
       min_stay=6 → 6N + 7N
       min_stay=7 → 7N solo
@@ -66,7 +67,6 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
         min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
     if disponibles <= 2:
-        # Protect revenue: only the entry-level rate, no discounts
         entry = _get_entry_slot(min_stay)
         return {
             "STANDARD": entry == "STANDARD",
@@ -77,7 +77,6 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
         }
 
     if min_stay <= 2:
-        # Solo estancias cortas — no ofrecer descuentos de larga duración
         return {
             "STANDARD": True,
             "4NOCHES":  False,
@@ -86,8 +85,6 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
             "SEMANAL":  False,
         }
 
-    # min_stay >= 3: Standard abierta si min_stay == 3, cerrada si > 3
-    # Cada tarifa de duración abierta si min_stay <= su duración
     return {
         "STANDARD": min_stay <= 3,
         "4NOCHES":  min_stay <= 4,
@@ -120,10 +117,10 @@ OCC_HIGH = 0.75
 
 SLOT_TO_FIELD = {
     "STANDARD": "price1",
-    "6NOCHES": "price4",
-    "5NOCHES": "price5",
-    "4NOCHES": "price6",
-    "SEMANAL": "price7",
+    "6NOCHES": "price3",
+    "5NOCHES": "price4",
+    "4NOCHES": "price5",
+    "SEMANAL": "price10",
 }
 
 
