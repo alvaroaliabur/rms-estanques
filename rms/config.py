@@ -121,8 +121,8 @@ BEAT_THE_BEST = {
     # Revenue del mejor año por mes (se actualiza desde /revenue)
     # Estos son valores semilla — el sistema los actualiza automáticamente
     "BEST_REVENUE_BY_MONTH": {
-        1: 4200, 2: 5800, 3: 8500, 4: 14200, 5: 18500, 6: 28000,
-        7: 42000, 8: 46000, 9: 25000, 10: 16000, 11: 5500, 12: 8000,
+        1: 3041, 2: 16800, 3: 21427, 4: 27089, 5: 33432, 6: 53156,
+        7: 66895, 8: 82290, 9: 49559, 10: 31078, 11: 18285, 12: 18618,
     },
     "BEST_YEAR_BY_MONTH": {
         1: 2025, 2: 2025, 3: 2025, 4: 2025, 5: 2025, 6: 2025,
