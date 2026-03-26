@@ -1,11 +1,11 @@
 """
-Explicación — v7.5
-Dashboard con señales nuevas:
-- Beat-the-Best semáforo por mes (🏆/🎯/⚠️)
-- Suelo dinámico por days_out (floorFactor)
-- Early bird sep/oct (earlyBird)
-- Ajuste IA Claude (claudeAjuste/claudeMotivo)
-- Demanda no restringida (uncUplift)
+Explicación — v7.6
+Dashboard con métricas corregidas:
+- ADR REAL CONFIRMADO: revenue_confirmado / noches_vendidas (no precio cotizado del RMS)
+  Para meses futuros con pocas reservas muestra datos reales disponibles.
+- REVPAR como columna en tabla mensual: revenue / (unidades × días mes)
+- Canal "other" visible en canal mix: detecta OTAs no mapeadas
+- Señales v7.5 mantenidas intactas
 """
 
 import logging
@@ -80,14 +80,13 @@ def _build_dashboard(results):
             continue
         if m not in meses:
             meses[m] = {
-                "n": 0, "reservadas": 0, "sum_precio": 0,
+                "n": 0, "reservadas": 0,
                 "suelos": 0, "techos": 0, "presion": 0,
                 "early_bird": 0, "dynamic_floor": 0, "claude_ajustes": 0,
             }
         mm = meses[m]
         mm["n"] += 1
         mm["reservadas"] += r.get("reservadas", 0)
-        mm["sum_precio"] += r.get("precioFinal", 0)
         if r.get("clampedBy") == "SUELO":
             mm["suelos"] += 1
         if r.get("clampedBy") == "TECHO":
@@ -129,25 +128,39 @@ def _build_dashboard(results):
         total_nights = config.TOTAL_UNITS * n_dias
         nights_otb = mm["reservadas"]
         occ_pct = round(nights_otb / total_nights * 100)
-        adr_pub = round(mm["sum_precio"] / n_dias) if n_dias > 0 else 0
-        adr_genius = round(adr_pub * 0.85)
 
-        rev_otb_simple = round(mm["reservadas"] * adr_pub * 0.85)
+        # ── ADR REAL CONFIRMADO (v7.6) ──────────────────────────────────────
+        # ty_adr viene del revenue tracker: revenue_confirmado / noches_vendidas
+        # Es el ADR que los huéspedes han pagado realmente, no el precio cotizado.
+        ty_adr_real = rt.get("ty_adr", 0)   # ADR real confirmado (€ Genius que paga el huésped)
+        ty_nights_real = rt.get("ty_nights", 0)
+        ty_rev = rt.get("ty_revenue", 0)
 
-        rev_ty = rt.get("ty_revenue", 0)
+        # RevPAR real confirmado (v7.6)
+        ty_revpar = rt.get("ty_revpar", 0)
+        best_revpar = rt.get("best_revpar", 0)
+
+        # Para meses con pocas reservas, indicar cuántas noches confirman el ADR
+        adr_sample_note = ""
+        if ty_nights_real > 0 and ty_nights_real < 10 and not (m < today.month):
+            adr_sample_note = f'<span style="color:#aaa;font-size:0.75em"> ({ty_nights_real}n)</span>'
+
         best_rev = rt.get("best_revenue", 0)
         best_year = rt.get("best_year", "")
-        diff_rev = round((rev_ty - best_rev) / best_rev * 100) if best_rev > 0 else 0
+        best_adr = rt.get("best_adr", 0)
+        diff_rev = round((ty_rev - best_rev) / best_rev * 100) if best_rev > 0 else 0
         diff_sign = "+" if diff_rev >= 0 else ""
 
-        rev_for_btb = rev_ty if rev_ty > 0 else rev_otb_simple
+        rev_for_btb = ty_rev if ty_rev > 0 else 0
         btb = _btb_status(m, rev_for_btb)
 
         ba_m = ba.get(m, {})
         ref_adr = ba_m.get("ref_adr", 0)
         rank_nights = ba_m.get("rank_nights", 0)
         total_props = ba_m.get("total_props", 26)
-        adr_vs_ref = round(((adr_genius - ref_adr) / ref_adr * 100)) if ref_adr > 0 else None
+
+        # ADR vs ref — usar ADR real confirmado para comparativa honesta
+        adr_vs_ref = round(((ty_adr_real - ref_adr) / ref_adr * 100)) if ref_adr > 0 and ty_adr_real > 0 else None
 
         is_past = m < today.month
         if is_past:
@@ -195,6 +208,21 @@ def _build_dashboard(results):
         else:
             btb_html = ""
 
+        # ADR display: real confirmado
+        if ty_adr_real > 0:
+            adr_html = f'<strong>{ty_adr_real}€</strong>{adr_sample_note}<br>{adr_ref_html}'
+        else:
+            adr_html = f'<span style="color:#aaa">—</span><br>{adr_ref_html}'
+
+        # RevPAR display (v7.6)
+        if ty_revpar > 0:
+            revpar_color = "#27ae60" if best_revpar == 0 or ty_revpar >= best_revpar else "#e74c3c"
+            revpar_html = f'<span style="color:{revpar_color};font-weight:600">{ty_revpar}€</span>'
+            if best_revpar > 0:
+                revpar_html += f'<br><span style="color:#aaa;font-size:0.78em">best {best_revpar}€</span>'
+        else:
+            revpar_html = '<span style="color:#aaa">—</span>'
+
         # Señales v7.5 compactas
         signals = []
         if mm["early_bird"] > 0 and not is_past:
@@ -211,7 +239,7 @@ def _build_dashboard(results):
         <tr onclick="filtrarMes({m})" style="cursor:pointer" class="fila-mes" data-mes="{m}">
             <td style="padding:10px 12px;font-weight:600;color:#1a1a2e">{MONTH_NAMES[m]}</td>
             <td style="padding:10px 12px;text-align:right">
-                {'<span style="color:#aaa">—</span>' if rev_ty == 0 else f'<strong>{rev_ty:,}€</strong>'}
+                {'<span style="color:#aaa">—</span>' if ty_rev == 0 else f'<strong>{ty_rev:,}€</strong>'}
             </td>
             <td style="padding:10px 12px;text-align:center">
                 {'<span style="color:#aaa;font-size:0.85em">—</span>' if best_rev == 0 else f'<span style="color:{rev_color};font-weight:600">{diff_sign}{diff_rev}%</span><span style="color:#aaa;font-size:0.78em"> ({best_year})</span>'}
@@ -220,7 +248,10 @@ def _build_dashboard(results):
                 {btb_html}
             </td>
             <td style="padding:10px 12px;text-align:center">
-                <strong>{adr_genius}€</strong><br>{adr_ref_html}
+                {adr_html}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
+                {revpar_html}
             </td>
             <td style="padding:10px 12px;text-align:center">
                 {rank_html}
@@ -235,7 +266,7 @@ def _build_dashboard(results):
         </tr>"""
 
         if not is_past and diff_rev < -15 and best_rev > 0:
-            nights_gap = round((best_rev - rev_ty) / (adr_genius if adr_genius > 0 else 200))
+            nights_gap = round((best_rev - ty_rev) / (ty_adr_real if ty_adr_real > 0 else 200))
             if rank_nights > 15 and occ_pct < 60:
                 accion = f"Bajar minStay a {max(3, config.DEFAULT_MIN_STAY.get('A', 5) - 2)}n para ganar volumen. Rank noches #{rank_nights} — precio OK, problema de volumen."
             elif occ_pct < 40:
@@ -277,7 +308,8 @@ def _build_dashboard(results):
                     <th style="padding:10px 12px;text-align:right;font-weight:600">Revenue OTB</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">vs Mejor</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">🏆 Beat Target</th>
-                    <th style="padding:10px 12px;text-align:center;font-weight:600">ADR Genius</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">ADR real</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">RevPAR</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Rank noches</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Disp media</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Llenado</th>
@@ -318,9 +350,15 @@ def _build_canal_html(rev_tracker, today):
         pct = round(datos["rev"] / total_rev * 100)
         adr = round(datos["rev"] / datos["nights"]) if datos["nights"] > 0 else 0
         net_adr = round(datos["net_rev"] / datos["nights"]) if datos["nights"] > 0 else 0
-        color = "#27ae60" if canal == "direct" else "#2980b9" if canal == "booking" else "#8e44ad"
+        if canal == "direct":
+            color = "#27ae60"
+        elif canal == "booking":
+            color = "#2980b9"
+        else:
+            color = "#8e44ad"  # airbnb
+        canal_label = canal.title()
         canal_items.append(
-            f'<span style="color:{color}"><strong>{canal.title()}</strong> {pct}% '
+            f'<span style="color:{color}"><strong>{canal_label}</strong> {pct}% '
             f'({datos["count"]}res, ADR {adr}€, neto <strong>{net_adr}€</strong>)</span>'
         )
 
@@ -632,13 +670,11 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
     leyenda = """
     <div style="background:white;border-radius:8px;padding:10px 16px;margin-bottom:12px;
                 box-shadow:0 1px 4px rgba(0,0,0,0.05);font-size:0.82em;color:#555;line-height:1.6">
-        <strong>Señales v7.5:</strong>
-        🐦 Early bird (sep/oct, &gt;60d, &lt;15% occ) ·
-        📉 Suelo dinámico (floor reducido por antelación) ·
-        📈 Demanda no restringida ·
-        🧠 Ajuste IA ·
-        ⏱️ Presión temporal ·
-        🏆 Beat-the-Best (+5% sobre mejor año)
+        <strong>Señales v7.6:</strong>
+        ADR = revenue confirmado / noches vendidas ·
+        RevPAR = revenue / (9 aptos × días mes) ·
+        🐦 Early bird · 📉 Suelo dinámico · 📈 Demanda no restringida ·
+        🧠 Ajuste IA · ⏱️ Presión temporal · 🏆 Beat-the-Best (+5% sobre mejor año)
     </div>"""
 
     n_visible = len([r for r in results if not month_filter or int(r['date'][5:7]) == month_filter])
@@ -648,7 +684,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RMS Estanques v7.5</title>
+<title>RMS Estanques v7.6</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
@@ -667,7 +703,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
     border-bottom: 1px solid #e8ecf0;
     display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
   }}
-  .content {{ max-width: 1100px; margin: 0 auto; padding: 20px 16px; }}
+  .content {{ max-width: 1200px; margin: 0 auto; padding: 20px 16px; }}
   .section-title {{
     font-size: 0.78em; font-weight: 700; letter-spacing: 0.08em;
     text-transform: uppercase; color: #888; margin: 20px 0 10px 0;
@@ -680,7 +716,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 <body>
 
 <div class="header">
-  <h1>RMS Estanques v7.5</h1>
+  <h1>RMS Estanques v7.6</h1>
   <div class="header-links">
     <a href="/run">↺ Recalcular</a>
     <a href="/prices/compare">Tabla</a>
