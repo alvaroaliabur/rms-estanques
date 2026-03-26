@@ -1,12 +1,11 @@
 """
-Explicación — v7.4
-Dashboard rediseñado:
-- ADR propio vs ADR grupo referencia (Booking Analytics)
-- Tabla de meses centrada, columnas claras
-- Indicador de pace visual (velocidad de llenado)
-- Alertas accionables con qué hacer exactamente
-- Detalle por fecha: tabla compacta, expansión limpia
-- Columnas centradas
+Explicación — v7.5
+Dashboard con señales nuevas:
+- Beat-the-Best semáforo por mes (🏆/🎯/⚠️)
+- Suelo dinámico por days_out (floorFactor)
+- Early bird sep/oct (earlyBird)
+- Ajuste IA Claude (claudeAjuste/claudeMotivo)
+- Demanda no restringida (uncUplift)
 """
 
 import logging
@@ -32,20 +31,47 @@ DAY_NAMES_FULL = {
 }
 
 
+# ──────────────────────────────────────────
+# BEAT-THE-BEST helper
+# ──────────────────────────────────────────
+
+def _btb_status(mes, rev_otb):
+    """Returns BTB dict or None. Compares rev_otb vs target (best × 1.05)."""
+    btb = getattr(config, 'BEAT_THE_BEST', {})
+    if not btb.get("enabled"):
+        return None
+
+    best = btb.get("BEST_REVENUE_BY_MONTH", {}).get(mes, 0)
+    best_year = btb.get("BEST_YEAR_BY_MONTH", {}).get(mes, "")
+    uplift = btb.get("target_uplift", 1.05)
+    target = round(best * uplift)
+
+    if best <= 0 or rev_otb <= 0:
+        return None
+
+    pct = round((rev_otb - target) / target * 100)
+    if pct >= 0:
+        return {"emoji": "🏆", "color": "#27ae60", "label": f"+{pct}% vs target", "pct": pct,
+                "target": target, "best": best, "best_year": best_year}
+    elif pct >= -15:
+        return {"emoji": "🎯", "color": "#f39c12", "label": f"{pct}% vs target", "pct": pct,
+                "target": target, "best": best, "best_year": best_year}
+    else:
+        return {"emoji": "⚠️", "color": "#e74c3c", "label": f"{pct}% vs target", "pct": pct,
+                "target": target, "best": best, "best_year": best_year}
+
+
 # ══════════════════════════════════════════
-# DASHBOARD — Vista superior (1 pantalla)
+# DASHBOARD
 # ══════════════════════════════════════════
 
 def _build_dashboard(results):
     today = date.today()
     current_year = today.year
 
-    # YTD
     ytd_rev = 0
-    ytd_genius = 0
     best_hist_ytd = 0
 
-    # Agrupar por mes
     meses = {}
     for r in results:
         m = int(r["date"][5:7])
@@ -56,7 +82,7 @@ def _build_dashboard(results):
             meses[m] = {
                 "n": 0, "reservadas": 0, "sum_precio": 0,
                 "suelos": 0, "techos": 0, "presion": 0,
-                "rev_otb": 0,
+                "early_bird": 0, "dynamic_floor": 0, "claude_ajustes": 0,
             }
         mm = meses[m]
         mm["n"] += 1
@@ -68,8 +94,13 @@ def _build_dashboard(results):
             mm["techos"] += 1
         if r.get("presionTemporal"):
             mm["presion"] += 1
+        if r.get("earlyBird"):
+            mm["early_bird"] += 1
+        if r.get("floorFactor", 1.0) < 1.0:
+            mm["dynamic_floor"] += 1
+        if r.get("claudeAjuste"):
+            mm["claude_ajustes"] += 1
 
-    # Revenue tracker (desde config si está disponible)
     rev_tracker = {}
     try:
         from rms.revenue import calcular_revenue_tracker
@@ -77,7 +108,6 @@ def _build_dashboard(results):
     except Exception:
         pass
 
-    # YTD
     for m in range(1, today.month + 1):
         rt = rev_tracker.get(m, {})
         ytd_rev += rt.get("ty_revenue", 0)
@@ -87,10 +117,7 @@ def _build_dashboard(results):
     ytd_color = "#27ae60" if ytd_diff >= 0 else "#e74c3c"
     ytd_sign = "+" if ytd_diff >= 0 else ""
 
-    # Booking Analytics para referencia
     ba = getattr(config, 'BOOKING_ANALYTICS', {})
-
-    # Filas de la tabla de meses
     filas = ""
     alertas_acciones = []
 
@@ -105,23 +132,24 @@ def _build_dashboard(results):
         adr_pub = round(mm["sum_precio"] / n_dias) if n_dias > 0 else 0
         adr_genius = round(adr_pub * 0.85)
 
-        # Revenue
+        rev_otb_simple = round(mm["reservadas"] * adr_pub * 0.85)
+
         rev_ty = rt.get("ty_revenue", 0)
         best_rev = rt.get("best_revenue", 0)
         best_year = rt.get("best_year", "")
         diff_rev = round((rev_ty - best_rev) / best_rev * 100) if best_rev > 0 else 0
         diff_sign = "+" if diff_rev >= 0 else ""
 
-        # ADR referencia desde Booking Analytics
+        rev_for_btb = rev_ty if rev_ty > 0 else rev_otb_simple
+        btb = _btb_status(m, rev_for_btb)
+
         ba_m = ba.get(m, {})
         ref_adr = ba_m.get("ref_adr", 0)
         rank_nights = ba_m.get("rank_nights", 0)
         total_props = ba_m.get("total_props", 26)
         adr_vs_ref = round(((adr_genius - ref_adr) / ref_adr * 100)) if ref_adr > 0 else None
 
-        # Llenado
         is_past = m < today.month
-        is_current = m == today.month
         if is_past:
             llenado_txt = "cerrado"
             llenado_color = "#95a5a6"
@@ -140,7 +168,6 @@ def _build_dashboard(results):
                 llenado_color = "#e74c3c"
                 llenado_icon = "⚠"
 
-        # Color revenue
         if diff_rev >= 5:
             rev_color = "#27ae60"
         elif diff_rev >= -5:
@@ -148,7 +175,6 @@ def _build_dashboard(results):
         else:
             rev_color = "#e74c3c"
 
-        # ADR vs ref display
         if adr_vs_ref is not None:
             adr_ref_sign = "+" if adr_vs_ref >= 0 else ""
             adr_ref_color = "#27ae60" if adr_vs_ref >= 0 else "#e74c3c"
@@ -156,15 +182,30 @@ def _build_dashboard(results):
         else:
             adr_ref_html = '<span style="color:#aaa;font-size:0.82em">—</span>'
 
-        # Rank noches
         if rank_nights > 0 and not is_past:
             rank_color = "#27ae60" if rank_nights <= 10 else "#e67e22" if rank_nights <= 18 else "#e74c3c"
             rank_html = f'<span style="color:{rank_color};font-size:0.85em">#{rank_nights}/{total_props}</span>'
         else:
             rank_html = ""
 
-        # Presión temporal activa
-        presion_html = f'<span style="color:#e67e22;font-size:0.8em">↓{mm["presion"]}d</span>' if mm["presion"] > 0 else ""
+        if btb and not is_past:
+            btb_html = f'<span style="color:{btb["color"]};font-size:0.82em;white-space:nowrap">{btb["emoji"]} {btb["label"]}<br><span style="color:#aaa;font-size:0.92em">target {btb["target"]:,}€</span></span>'
+        elif not is_past:
+            btb_html = '<span style="color:#aaa;font-size:0.82em">—</span>'
+        else:
+            btb_html = ""
+
+        # Señales v7.5 compactas
+        signals = []
+        if mm["early_bird"] > 0 and not is_past:
+            signals.append(f'<span style="color:#e67e22;font-size:0.78em" title="Early bird activo">🐦{mm["early_bird"]}d</span>')
+        if mm["dynamic_floor"] > 0 and not is_past:
+            signals.append(f'<span style="color:#3498db;font-size:0.78em" title="Suelo dinámico">📉{mm["dynamic_floor"]}d</span>')
+        if mm["presion"] > 0:
+            signals.append(f'<span style="color:#e67e22;font-size:0.78em" title="Presión temporal">⏱{mm["presion"]}d</span>')
+        if mm["claude_ajustes"] > 0:
+            signals.append(f'<span style="color:#8e44ad;font-size:0.78em" title="Ajuste IA">🧠{mm["claude_ajustes"]}d</span>')
+        signals_html = " ".join(signals)
 
         filas += f"""
         <tr onclick="filtrarMes({m})" style="cursor:pointer" class="fila-mes" data-mes="{m}">
@@ -176,6 +217,9 @@ def _build_dashboard(results):
                 {'<span style="color:#aaa;font-size:0.85em">—</span>' if best_rev == 0 else f'<span style="color:{rev_color};font-weight:600">{diff_sign}{diff_rev}%</span><span style="color:#aaa;font-size:0.78em"> ({best_year})</span>'}
             </td>
             <td style="padding:10px 12px;text-align:center">
+                {btb_html}
+            </td>
+            <td style="padding:10px 12px;text-align:center">
                 <strong>{adr_genius}€</strong><br>{adr_ref_html}
             </td>
             <td style="padding:10px 12px;text-align:center">
@@ -185,33 +229,26 @@ def _build_dashboard(results):
                 {round(nights_otb / config.TOTAL_UNITS, 1) if not is_past else '—'}
             </td>
             <td style="padding:10px 12px;text-align:center">
-                <span style="color:{llenado_color};font-weight:600">{llenado_icon} {llenado_txt}</span>
-                {presion_html}
+                <span style="color:{llenado_color};font-weight:600">{llenado_icon} {llenado_txt}</span><br>
+                {signals_html}
             </td>
         </tr>"""
 
-        # Alertas accionables
         if not is_past and diff_rev < -15 and best_rev > 0:
             nights_gap = round((best_rev - rev_ty) / (adr_genius if adr_genius > 0 else 200))
-            # Diagnóstico específico
             if rank_nights > 15 and occ_pct < 60:
-                accion = f"Bajar minStay a {max(3, config.DEFAULT_MIN_STAY.get('A', 5) - 2)}n para ganar volumen. Tu rank de noches es #{rank_nights} — precio OK, el problema es volumen."
+                accion = f"Bajar minStay a {max(3, config.DEFAULT_MIN_STAY.get('A', 5) - 2)}n para ganar volumen. Rank noches #{rank_nights} — precio OK, problema de volumen."
             elif occ_pct < 40:
                 accion = f"Revisar suelo y minStay. Solo {occ_pct}% ocupado a {(date(current_year, m, 1) - today).days}d vista."
             else:
                 accion = f"Monitorizar pickup. Necesitas ~{nights_gap} noches más para igualar {best_year}."
             alertas_acciones.append({
-                "mes": MONTH_NAMES[m],
-                "diff": diff_rev,
-                "accion": accion,
+                "mes": MONTH_NAMES[m], "diff": diff_rev, "accion": accion,
                 "nights_otb": nights_otb,
-                "best_nights": round(best_rev / (adr_genius if adr_genius > 0 else 200)),
             })
 
-    # Canal mix
     canal_html = _build_canal_html(rev_tracker, today)
 
-    # Alertas
     alertas_html = ""
     for a in alertas_acciones:
         alertas_html += f"""
@@ -233,13 +270,14 @@ def _build_dashboard(results):
 
     tabla = f"""
     <div style="background:white;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);margin-bottom:16px">
-        <table style="width:100%;border-collapse:collapse;font-size:0.9em">
+        <table style="width:100%;border-collapse:collapse;font-size:0.88em">
             <thead>
                 <tr style="background:#1a1a2e;color:white">
                     <th style="padding:10px 12px;text-align:left;font-weight:600">Mes</th>
                     <th style="padding:10px 12px;text-align:right;font-weight:600">Revenue OTB</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">vs Mejor</th>
-                    <th style="padding:10px 12px;text-align:center;font-weight:600">ADR (Genius / vs ref)</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">🏆 Beat Target</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600">ADR Genius</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Rank noches</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Disp media</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">Llenado</th>
@@ -255,10 +293,8 @@ def _build_dashboard(results):
 
 
 def _build_canal_html(rev_tracker, today):
-    """Canal mix del año actual."""
     canales = {}
     total_rev = 0
-    total_res = 0
 
     for m, rt in rev_tracker.items():
         if m > today.month:
@@ -271,14 +307,11 @@ def _build_canal_html(rev_tracker, today):
             canales[canal]["nights"] += datos.get("nights", 0)
             canales[canal]["net_rev"] += datos.get("net_revenue", 0)
             total_rev += datos.get("revenue", 0)
-            total_res += datos.get("count", 0)
 
     if not canales or total_rev == 0:
         return ""
 
-    comisiones_pagadas = sum(
-        c["rev"] - c["net_rev"] for c in canales.values()
-    )
+    comisiones_pagadas = sum(c["rev"] - c["net_rev"] for c in canales.values())
 
     canal_items = []
     for canal, datos in sorted(canales.items(), key=lambda x: -x[1]["rev"]):
@@ -291,7 +324,6 @@ def _build_canal_html(rev_tracker, today):
             f'({datos["count"]}res, ADR {adr}€, neto <strong>{net_adr}€</strong>)</span>'
         )
 
-    # Directas este año vs LY
     direct_ty = canales.get("direct", {}).get("rev", 0)
     direct_pct_ty = round(direct_ty / total_rev * 100) if total_rev > 0 else 0
 
@@ -306,11 +338,10 @@ def _build_canal_html(rev_tracker, today):
 
 
 # ══════════════════════════════════════════
-# TABLA DE FECHAS — Compacta con expansión
+# TABLA DE FECHAS
 # ══════════════════════════════════════════
 
 def _build_tabla_fechas(results, month_filter=None):
-    """Tabla compacta de fechas. Clic en fila = expandir detalle."""
     from rms.utils import parse_date
 
     filas = ""
@@ -333,28 +364,22 @@ def _build_tabla_fechas(results, month_filter=None):
         min_stay = r.get("minStay", 3)
         clamped = r.get("clampedBy", "")
         event_name = r.get("eventName", "")
-        days_out = r.get("daysOut", 0)
-        suelo = r.get("suelo", 0)
-        techo = r.get("techo", 0)
         gap = r.get("gapOverride", False)
         presion = r.get("presionTemporal", False)
         vac = r.get("vacFactor", 1.0)
+        early_bird = r.get("earlyBird", False)
+        floor_factor = r.get("floorFactor", 1.0)
+        claude_ajuste = r.get("claudeAjuste", False)
 
-        # Color de disponibilidad
         if disp == 0:
-            disp_color = "#e74c3c"
-            disp_txt = "LLENO"
+            disp_color = "#e74c3c"; disp_txt = "LLENO"
         elif disp <= 2:
-            disp_color = "#e67e22"
-            disp_txt = str(disp)
+            disp_color = "#e67e22"; disp_txt = str(disp)
         elif disp <= 4:
-            disp_color = "#f39c12"
-            disp_txt = str(disp)
+            disp_color = "#f39c12"; disp_txt = str(disp)
         else:
-            disp_color = "#95a5a6"
-            disp_txt = str(disp)
+            disp_color = "#95a5a6"; disp_txt = str(disp)
 
-        # Badge de clamp
         clamp_badge = ""
         if clamped == "SUELO":
             clamp_badge = '<span style="background:#3498db;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">SUELO</span>'
@@ -363,51 +388,42 @@ def _build_tabla_fechas(results, month_filter=None):
         elif clamped == "PROT":
             clamp_badge = '<span style="background:#9b59b6;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">PROT</span>'
 
-        # Notas compactas
+        if claude_ajuste:
+            claude_orig = r.get("claudePrecioOriginal", 0)
+            dir_arrow = "↑" if precio > claude_orig else "↓"
+            clamp_badge += f'<span style="background:#8e44ad;color:white;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px">🧠{dir_arrow}{claude_orig}→{precio}</span>'
+
         notas = []
         if event_name:
             notas.append(f"🎉 {event_name}")
         if vac > 1.0:
             notas.append(f"🏫 Vac+{round((vac-1)*100)}%")
+        if early_bird:
+            notas.append("🐦 EarlyBird")
+        if floor_factor < 1.0:
+            notas.append(f"📉 Suelo×{floor_factor:.0%}")
         if gap:
             notas.append("🔧 Gap")
         if presion:
             notas.append("⏱️ Presión")
 
         notas_txt = " · ".join(notas) if notas else ""
-
         bg = "#fafafa" if idx % 2 == 0 else "white"
         we_style = "font-weight:600;" if is_we else ""
-
-        # Detalle expandible
         detalle = _build_detalle(r, dow_full)
 
         filas += f"""
         <tr style="background:{bg};cursor:pointer" onclick="toggleDetalle({idx})"
             class="fila-fecha" data-mes="{m}">
-            <td style="padding:8px 10px;{we_style}color:#1a1a2e;white-space:nowrap">
-                {d.day}{dow}
-            </td>
-            <td style="padding:8px 10px;text-align:center;color:{disp_color};font-weight:600">
-                {disp_txt}
-            </td>
-            <td style="padding:8px 10px;text-align:right;font-weight:700;color:#1a1a2e">
-                {precio}€{clamp_badge}
-            </td>
-            <td style="padding:8px 10px;text-align:right;color:#666">
-                {genius}€
-            </td>
-            <td style="padding:8px 10px;text-align:center;color:#555">
-                {min_stay}n
-            </td>
-            <td style="padding:8px 10px;color:#666;font-size:0.85em">
-                {notas_txt}
-            </td>
+            <td style="padding:8px 10px;{we_style}color:#1a1a2e;white-space:nowrap">{d.day}{dow}</td>
+            <td style="padding:8px 10px;text-align:center;color:{disp_color};font-weight:600">{disp_txt}</td>
+            <td style="padding:8px 10px;text-align:right;font-weight:700;color:#1a1a2e">{precio}€{clamp_badge}</td>
+            <td style="padding:8px 10px;text-align:right;color:#666">{genius}€</td>
+            <td style="padding:8px 10px;text-align:center;color:#555">{min_stay}n</td>
+            <td style="padding:8px 10px;color:#666;font-size:0.85em">{notas_txt}</td>
         </tr>
         <tr id="detalle-{idx}" style="display:none;background:#f0f4f8">
-            <td colspan="6" style="padding:0">
-                {detalle}
-            </td>
+            <td colspan="6" style="padding:0">{detalle}</td>
         </tr>"""
         idx += 1
 
@@ -430,16 +446,16 @@ def _build_tabla_fechas(results, month_filter=None):
 
 
 def _build_detalle(r, dow_full):
-    """Detalle expandido de una fecha — limpio y estructurado."""
     from rms.utils import parse_date
 
     d = parse_date(r["date"])
-    month = d.month
 
     precio_neto = r.get("precioNeto", 0)
     precio_final = r.get("precioFinal", 0)
     precio_genius = r.get("precioGenius", 0)
     suelo = r.get("suelo", 0)
+    suelo_base = r.get("sueloBase", suelo)
+    floor_factor = r.get("floorFactor", 1.0)
     techo = r.get("techo", 0)
     clamped = r.get("clampedBy", "")
     days_out = r.get("daysOut", 0)
@@ -464,9 +480,12 @@ def _build_detalle(r, dow_full):
     min_rev_per_night = r.get("minRevPerNight", 0)
     last_minute = r.get("lastMinuteLevel", "")
     presion = r.get("presionTemporal", False)
+    early_bird = r.get("earlyBird", False)
     sc = r.get("seasonCode", "M")
+    claude_ajuste = r.get("claudeAjuste", False)
+    claude_motivo = r.get("claudeMotivo", "")
+    claude_original = r.get("claudePrecioOriginal", 0)
 
-    # Precio base Capa A
     seg = r.get("segment", "")
     ppd = config.SEGMENT_BASE.get(seg, {}).get("preciosPorDisp", {})
     disp_lookup = max(1, config.TOTAL_UNITS - reservadas)
@@ -474,12 +493,17 @@ def _build_detalle(r, dow_full):
     if isinstance(capa_a, dict):
         capa_a = capa_a.get("precio", "?")
 
-    # Construir cadena de cálculo
     pasos = []
     pasos.append(f"Capa A ({seg}, {disp_lookup} libre{'s' if disp_lookup != 1 else ''}): <strong>{capa_a}€</strong>")
 
+    if early_bird:
+        pasos.append(
+            f"🐦 <strong>Early bird</strong>: {days_out}d vista, {round(occ_now*100)}% occ "
+            f"→ descuento anticipado para capturar primera demanda (sep/oct)"
+        )
+
     if presion:
-        pasos.append(f"⏱️ Presión temporal (retrasado vs curva): bajada proactiva")
+        pasos.append(f"⏱️ <strong>Presión temporal</strong>: llenado retrasado vs curva → bajada proactiva")
 
     if pace_ratio != 1.0:
         direction = "adelantado" if pace_ratio > 1.0 else "retrasado"
@@ -498,12 +522,27 @@ def _build_detalle(r, dow_full):
         pasos.append(f"🎉 {event_name}: ×{event_factor:.2f} (+{round((event_factor-1)*100)}%)")
 
     if unc_uplift > 1.0:
-        pasos.append(f"📈 Demanda no restringida (escasez): ×{unc_uplift:.2f} (+{round((unc_uplift-1)*100)}%)")
+        pasos.append(
+            f"📈 <strong>Demanda no restringida</strong>: escasez histórica para esta combinación "
+            f"(seg+disponibilidad) → ×{unc_uplift:.2f} (+{round((unc_uplift-1)*100)}%)"
+        )
 
     genius_calculado = round(precio_neto * config.GENIUS_COMPENSATION)
     pasos.append(f"Neto {precio_neto}€ × {config.GENIUS_COMPENSATION} Genius = <strong>{genius_calculado}€</strong>")
 
-    # Guardarraíles
+    if floor_factor < 1.0:
+        pasos.append(
+            f"📉 <strong>Suelo dinámico</strong>: suelo base {suelo_base}€ × {floor_factor:.0%} "
+            f"({days_out}d vista) = suelo efectivo <strong>{suelo}€</strong>"
+        )
+
+    if claude_ajuste:
+        dir_txt = "subida" if precio_final > claude_original else "bajada"
+        pasos.append(
+            f"🧠 <strong>Ajuste IA</strong> ({dir_txt}): {claude_original}€ → {precio_final}€"
+            + (f" — {claude_motivo}" if claude_motivo else "")
+        )
+
     guardarrail = ""
     if clamped == "SUELO":
         guardarrail = f'<span style="background:#3498db;color:white;padding:2px 8px;border-radius:3px">SUELO {suelo}€</span> (cálculo daba {genius_calculado}€)'
@@ -515,13 +554,14 @@ def _build_detalle(r, dow_full):
     elif min_rev_applied:
         guardarrail = f'💰 Revenue mínimo: {min_rev_per_night}€/noche'
     elif suavizado:
-        textos = {"BAJADO": "📉 Suavizado -12% vs ayer", "SUBIDO": "📈 Suavizado +12% vs ayer",
-                  "MONO_UP": "📈 Monotonía: precio igualado al alza", "MONO_DN": "📉 Monotonía: precio igualado a la baja"}
+        textos = {
+            "BAJADO": "📉 Suavizado -12% vs ayer", "SUBIDO": "📈 Suavizado +12% vs ayer",
+            "MONO_UP": "📈 Monotonía: precio igualado al alza", "MONO_DN": "📉 Monotonía: precio igualado a la baja",
+        }
         guardarrail = textos.get(suavizado, suavizado)
     if last_minute:
         guardarrail += f' · ⏰ {last_minute}'
 
-    # MinStay
     if min_stay == min_stay_ground:
         minstay_txt = f"{min_stay} noches"
     else:
@@ -531,7 +571,14 @@ def _build_detalle(r, dow_full):
     if los_reduccion > 0:
         minstay_txt += f" <span style='color:#e67e22'>(reducido, premium ×{r.get('losPremium',1):.2f})</span>"
 
-    pasos_html = "".join(f'<div style="padding:3px 0;border-bottom:1px solid #e8ecf0;font-size:0.87em">{p}</div>' for p in pasos)
+    pasos_html = "".join(
+        f'<div style="padding:3px 0;border-bottom:1px solid #e8ecf0;font-size:0.87em">{p}</div>'
+        for p in pasos
+    )
+
+    suelo_display = f"Suelo {suelo}€"
+    if floor_factor < 1.0:
+        suelo_display += f' <span style="color:#3498db;font-size:0.85em">(din. base {suelo_base}€)</span>'
 
     return f"""
     <div style="padding:14px 20px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
@@ -545,7 +592,7 @@ def _build_detalle(r, dow_full):
             <div style="font-size:1.6em;font-weight:800;color:#1a1a2e">{precio_final}€</div>
             <div style="color:#888;font-size:0.9em">Genius: {precio_genius}€</div>
             <div style="margin-top:8px;font-size:0.87em;color:#555">MinStay: {minstay_txt}</div>
-            <div style="margin-top:4px;font-size:0.82em;color:#888">Suelo {suelo}€ · Techo {techo}€ · {days_out}d vista</div>
+            <div style="margin-top:4px;font-size:0.82em;color:#888">{suelo_display} · Techo {techo}€ · {days_out}d vista</div>
             <div style="margin-top:4px;font-size:0.82em;color:#888">{round(occ_now*100)}% ocupado · {round(occ_esperada*100)}% esperado</div>
         </div>
     </div>"""
@@ -558,71 +605,72 @@ def _build_detalle(r, dow_full):
 def generar_explicacion_html(results, month_filter=None, date_filter=None):
     today = date.today()
 
-    # Filtrar si hay date_filter
     if date_filter:
         results_filtrados = [r for r in results if r["date"] == date_filter]
     elif month_filter:
-        results_filtrados = results  # Tabla muestra todos los meses, filtra con JS
+        results_filtrados = results
     else:
         results_filtrados = results
 
-    # Dashboard siempre con todos los meses
     dashboard = _build_dashboard(results)
-
-    # Mes activo para la tabla
     mes_activo = month_filter or today.month
 
-    # Navegación de meses
-    nav_items = '<a href="/explicacion" style="margin:0 4px;color:#1a1a2e;text-decoration:none;padding:4px 8px;border-radius:4px' + (';background:#1a1a2e;color:white' if not month_filter else '') + '">Todo</a>'
+    nav_items = (
+        '<a href="/explicacion" style="margin:0 4px;color:#1a1a2e;text-decoration:none;padding:4px 8px;border-radius:4px'
+        + (';background:#1a1a2e;color:white' if not month_filter else '')
+        + '">Todo</a>'
+    )
     for m in range(1, 13):
         active_style = ";background:#1a1a2e;color:white" if month_filter == m else ""
-        nav_items += f'<a href="/explicacion?month={m}" style="margin:0 4px;color:#1a1a2e;text-decoration:none;padding:4px 8px;border-radius:4px{active_style}">{MONTH_NAMES[m]}</a>'
+        nav_items += (
+            f'<a href="/explicacion?month={m}" style="margin:0 4px;color:#1a1a2e;'
+            f'text-decoration:none;padding:4px 8px;border-radius:4px{active_style}">{MONTH_NAMES[m]}</a>'
+        )
 
-    # Tabla de fechas del mes activo
     tabla_fechas = _build_tabla_fechas(results, month_filter)
+
+    leyenda = """
+    <div style="background:white;border-radius:8px;padding:10px 16px;margin-bottom:12px;
+                box-shadow:0 1px 4px rgba(0,0,0,0.05);font-size:0.82em;color:#555;line-height:1.6">
+        <strong>Señales v7.5:</strong>
+        🐦 Early bird (sep/oct, &gt;60d, &lt;15% occ) ·
+        📉 Suelo dinámico (floor reducido por antelación) ·
+        📈 Demanda no restringida ·
+        🧠 Ajuste IA ·
+        ⏱️ Presión temporal ·
+        🏆 Beat-the-Best (+5% sobre mejor año)
+    </div>"""
+
+    n_visible = len([r for r in results if not month_filter or int(r['date'][5:7]) == month_filter])
 
     html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RMS Estanques v7.4</title>
+<title>RMS Estanques v7.5</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-    background: #f0f2f5;
-    color: #333;
-    min-height: 100vh;
+    background: #f0f2f5; color: #333; min-height: 100vh;
   }}
   .header {{
-    background: #1a1a2e;
-    color: white;
-    padding: 16px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    background: #1a1a2e; color: white; padding: 16px 24px;
+    display: flex; align-items: center; justify-content: space-between;
   }}
   .header h1 {{ font-size: 1.1em; font-weight: 700; letter-spacing: -0.02em; }}
   .header-links a {{ color: rgba(255,255,255,0.7); text-decoration: none; margin-left: 16px; font-size: 0.85em; }}
   .header-links a:hover {{ color: white; }}
   .nav {{
-    background: white;
-    padding: 10px 24px;
+    background: white; padding: 10px 24px;
     border-bottom: 1px solid #e8ecf0;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 2px;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
   }}
   .content {{ max-width: 1100px; margin: 0 auto; padding: 20px 16px; }}
   .section-title {{
-    font-size: 0.78em;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #888;
-    margin: 20px 0 10px 0;
+    font-size: 0.78em; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: #888; margin: 20px 0 10px 0;
   }}
   tbody tr.fila-fecha:hover td {{ background: #e8f4fd !important; }}
   tbody tr.fila-mes:hover td {{ background: #f0f7ff !important; }}
@@ -632,7 +680,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 <body>
 
 <div class="header">
-  <h1>RMS Estanques v7.4</h1>
+  <h1>RMS Estanques v7.5</h1>
   <div class="header-links">
     <a href="/run">↺ Recalcular</a>
     <a href="/prices/compare">Tabla</a>
@@ -647,11 +695,13 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 
 <div class="content">
 
+  {leyenda}
+
   <div class="section-title">Dashboard</div>
   {dashboard}
 
   <div class="section-title">
-    {'Todos los meses' if not month_filter else MONTH_NAMES_FULL.get(month_filter, '')} — {len([r for r in results if not month_filter or int(r['date'][5:7]) == month_filter])} días
+    {'Todos los meses' if not month_filter else MONTH_NAMES_FULL.get(month_filter, '')} — {n_visible} días
   </div>
   {tabla_fechas}
 
@@ -662,7 +712,6 @@ function toggleDetalle(idx) {{
   const el = document.getElementById('detalle-' + idx);
   if (el) el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
 }}
-
 function filtrarMes(m) {{
   window.location.href = '/explicacion?month=' + m;
 }}
