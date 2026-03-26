@@ -117,7 +117,7 @@ DEMAND_UNCONSTRAINING = {
 # ══════════════════════════════════════════
 BEAT_THE_BEST = {
     "enabled": True,
-    "target_uplift": 1.05,  # Objetivo: +5% sobre el mejor año
+    "target_uplift": 1.00,  # Objetivo: SUPERAR el mejor año (sin colchón artificial)
     # Revenue del mejor año por mes (se actualiza desde /revenue)
     # Estos son valores semilla — el sistema los actualiza automáticamente
     "BEST_REVENUE_BY_MONTH": {
