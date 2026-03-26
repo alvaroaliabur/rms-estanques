@@ -422,6 +422,69 @@ def source_file(filename):
 
 
 # ══════════════════════════════════════════
+# TEST: Price field mapping
+# ══════════════════════════════════════════
+
+@app.route("/test-mapping")
+def test_mapping():
+    """
+    Escribe precios únicos (111-999) en price1-price9 para 2027-01-15
+    en Upper Floor. Después mira el calendar de Beds24 en esa fecha
+    para ver qué fila muestra cada número.
+    """
+    from rms.beds24 import get_token, api_post
+    from rms import config
+
+    TEST_DATE = "2027-01-15"
+    ROOM_ID = config.ROOM_UPPER
+
+    get_token()
+
+    entry = {
+        "from": TEST_DATE, "to": TEST_DATE, "minStay": 2,
+        "price1": 111, "price2": 222, "price3": 333,
+        "price4": 444, "price5": 555, "price6": 666,
+        "price7": 777, "price8": 888, "price9": 999,
+    }
+
+    payload = [{"roomId": ROOM_ID, "calendar": [entry]}]
+    result = api_post("inventory/rooms/calendar", payload)
+
+    return (
+        "<h2>✅ Test escrito en 2027-01-15 (Upper Floor)</h2>"
+        "<p>Ve al calendar de Beds24 → enero 2027 → día 15</p>"
+        "<p>Anota qué fila muestra cada número:</p>"
+        "<pre>"
+        "111 → price1 = ¿?\n"
+        "222 → price2 = ¿?\n"
+        "333 → price3 = ¿?\n"
+        "444 → price4 = ¿?\n"
+        "555 → price5 = ¿?\n"
+        "666 → price6 = ¿?\n"
+        "777 → price7 = ¿?\n"
+        "888 → price8 = ¿?\n"
+        "999 → price9 = ¿?\n"
+        "</pre>"
+        "<p>Mándame un pantallazo y corrijo el mapping.</p>"
+        "<p><a href='/test-mapping-rollback'>Limpiar después</a></p>"
+    )
+
+
+@app.route("/test-mapping-rollback")
+def test_mapping_rollback():
+    from rms.beds24 import get_token, api_post
+    from rms import config
+
+    get_token()
+    entry = {"from": "2027-01-15", "to": "2027-01-15", "minStay": 3}
+    for i in range(1, 10):
+        entry[f"price{i}"] = 9999
+    payload = [{"roomId": config.ROOM_UPPER, "calendar": [entry]}]
+    api_post("inventory/rooms/calendar", payload)
+    return "<h2>✅ Rollback completado — 2027-01-15 limpio</h2>"
+
+
+# ══════════════════════════════════════════
 # SCHEDULER
 # ══════════════════════════════════════════
 
