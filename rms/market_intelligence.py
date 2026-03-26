@@ -65,7 +65,14 @@ def _api_post(endpoint, payload):
 # MARKET METRICS
 # ══════════════════════════════════════════
 
+def _airroi_enabled():
+    """Check if AirROI is enabled in config."""
+    return getattr(config, 'AIRROI_ENABLED', True)
+
+
 def get_market_occupancy():
+    if not _airroi_enabled():
+        return None
     data = _api_post("markets/metrics/occupancy", {"market": MARKET, "num_months": 24})
     if data:
         results = data.get("results", [])
