@@ -1,5 +1,5 @@
 """
-Explicación — v7.6
+Explicación — v7.7
 Dashboard con métricas corregidas:
 - ADR REAL CONFIRMADO: revenue_confirmado / noches_vendidas (no precio cotizado del RMS)
   Para meses futuros con pocas reservas muestra datos reales disponibles.
@@ -59,6 +59,46 @@ def _btb_status(mes, rev_otb):
     else:
         return {"emoji": "⚠️", "color": "#e74c3c", "label": f"{pct}% vs target", "pct": pct,
                 "target": target, "best": best, "best_year": best_year}
+
+
+def _build_vs_mejor_cell(ty_rev, best_rev, best_rev_now, diff_vs_now, diff_rev, diff_sign, rev_color, best_year, is_past):
+    """
+    Celda 'vs Mejor año' con dos niveles:
+    - Principal: diff_vs_now = vs mismo momento del mejor año (comparativa justa)
+    - Secundario: diff_rev = vs total final del mejor año (contexto)
+
+    Para meses pasados (cerrados): solo el total final tiene sentido.
+    Para meses futuros: el mismo momento es la métrica clave.
+    """
+    if best_rev == 0:
+        return '<span style="color:#aaa;font-size:0.85em">—</span>'
+
+    if is_past:
+        # Mes cerrado: comparar total final vs total final
+        sign = "+" if diff_rev >= 0 else ""
+        return (
+            f'<span style="color:{rev_color};font-weight:600">{sign}{diff_rev}%</span>'
+            f'<span style="color:#aaa;font-size:0.78em"> vs {best_year}</span>'
+        )
+
+    # Mes futuro: mostrar "mismo momento" como dato principal
+    if diff_vs_now is not None and best_rev_now > 0:
+        now_sign = "+" if diff_vs_now >= 0 else ""
+        now_color = "#27ae60" if diff_vs_now >= 5 else "#f39c12" if diff_vs_now >= -5 else "#e74c3c"
+        # Dato secundario: vs total final (contexto del potencial máximo)
+        final_sign = "+" if diff_rev >= 0 else ""
+        return (
+            f'<span style="color:{now_color};font-weight:700;font-size:1.05em">{now_sign}{diff_vs_now}%</span>'
+            f'<span style="color:#aaa;font-size:0.75em"> vs {best_year} hoy</span><br>'
+            f'<span style="color:#bbb;font-size:0.75em">{final_sign}{diff_rev}% vs total {best_year}</span>'
+        )
+    else:
+        # Sin dato de mismo momento (año sin suficiente histórico)
+        sign = "+" if diff_rev >= 0 else ""
+        return (
+            f'<span style="color:{rev_color};font-weight:600">{sign}{diff_rev}%</span>'
+            f'<span style="color:#aaa;font-size:0.78em"> ({best_year} total)</span>'
+        )
 
 
 # ══════════════════════════════════════════
@@ -181,9 +221,12 @@ def _build_dashboard(results):
                 llenado_color = "#e74c3c"
                 llenado_icon = "⚠"
 
-        if diff_rev >= 5:
+        # Color basado en diff_vs_now (mismo momento) si está disponible,
+        # sino fallback a diff_rev (vs total final)
+        _diff_for_color = diff_vs_now if diff_vs_now is not None else diff_rev
+        if _diff_for_color >= 5:
             rev_color = "#27ae60"
-        elif diff_rev >= -5:
+        elif _diff_for_color >= -5:
             rev_color = "#f39c12"
         else:
             rev_color = "#e74c3c"
@@ -242,7 +285,7 @@ def _build_dashboard(results):
                 {'<span style="color:#aaa">—</span>' if ty_rev == 0 else f'<strong>{ty_rev:,}€</strong>'}
             </td>
             <td style="padding:10px 12px;text-align:center">
-                {'<span style="color:#aaa;font-size:0.85em">—</span>' if best_rev == 0 else f'<span style="color:{rev_color};font-weight:600">{diff_sign}{diff_rev}%</span><span style="color:#aaa;font-size:0.78em"> ({best_year})</span>'}
+                {_build_vs_mejor_cell(ty_rev, best_rev, best_rev_now, diff_vs_now, diff_rev, diff_sign, rev_color, best_year, is_past)}
             </td>
             <td style="padding:10px 12px;text-align:center">
                 {btb_html}
@@ -265,8 +308,11 @@ def _build_dashboard(results):
             </td>
         </tr>"""
 
-        if not is_past and diff_rev < -15 and best_rev > 0:
-            nights_gap = round((best_rev - ty_rev) / (ty_adr_real if ty_adr_real > 0 else 200))
+        # Alertas: usar diff_vs_now (mismo momento) si está disponible, sino diff_rev
+        _alert_diff = diff_vs_now if diff_vs_now is not None else diff_rev
+        _alert_rev_ref = best_rev_now if best_rev_now > 0 else best_rev
+        if not is_past and _alert_diff < -15 and _alert_rev_ref > 0:
+            nights_gap = round((_alert_rev_ref - ty_rev) / (ty_adr_real if ty_adr_real > 0 else 200))
             if rank_nights > 15 and occ_pct < 60:
                 accion = f"Bajar minStay a {max(3, config.DEFAULT_MIN_STAY.get('A', 5) - 2)}n para ganar volumen. Rank noches #{rank_nights} — precio OK, problema de volumen."
             elif occ_pct < 40:
@@ -306,7 +352,7 @@ def _build_dashboard(results):
                 <tr style="background:#1a1a2e;color:white">
                     <th style="padding:10px 12px;text-align:left;font-weight:600">Mes</th>
                     <th style="padding:10px 12px;text-align:right;font-weight:600">Revenue OTB</th>
-                    <th style="padding:10px 12px;text-align:center;font-weight:600">vs Mejor</th>
+                    <th style="padding:10px 12px;text-align:center;font-weight:600" title="Revenue total final del mejor año histórico — no el mismo momento del año">vs Mejor año ⓘ</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">🏆 Beat Target</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">ADR real</th>
                     <th style="padding:10px 12px;text-align:center;font-weight:600">RevPAR</th>
@@ -362,15 +408,12 @@ def _build_canal_html(rev_tracker, today):
             f'({datos["count"]}res, ADR {adr}€, neto <strong>{net_adr}€</strong>)</span>'
         )
 
-    direct_ty = canales.get("direct", {}).get("rev", 0)
-    direct_pct_ty = round(direct_ty / total_rev * 100) if total_rev > 0 else 0
 
     return f"""
     <div style="background:white;border-radius:10px;padding:14px 20px;margin-bottom:16px;
                 box-shadow:0 2px 8px rgba(0,0,0,0.06);font-size:0.88em">
         <strong>Canal mix {today.year}:</strong>
         {' · '.join(canal_items)}
-        {'<span style="color:#27ae60"> — 📈 Directas ' + str(direct_pct_ty) + '%</span>' if direct_pct_ty > 0 else ''}
         <span style="color:#e74c3c"> — Comisiones pagadas: <strong>{comisiones_pagadas:,.0f}€</strong></span>
     </div>"""
 
@@ -684,7 +727,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RMS Estanques v7.6</title>
+<title>RMS Estanques v7.7</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{
@@ -716,7 +759,7 @@ def generar_explicacion_html(results, month_filter=None, date_filter=None):
 <body>
 
 <div class="header">
-  <h1>RMS Estanques v7.6</h1>
+  <h1>RMS Estanques v7.7</h1>
   <div class="header-links">
     <a href="/run">↺ Recalcular</a>
     <a href="/prices/compare">Tabla</a>
