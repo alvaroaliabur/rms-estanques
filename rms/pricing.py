@@ -1,16 +1,14 @@
 """
-RMS v7.5 Pricing Engine — Forecast → Optimize → Execute → Smooth
+RMS v7.6 Pricing Engine — Forecast → Optimize → Execute → Smooth
 
-CAMBIOS v7.5 vs v7.4:
-  - P3: Suelos dinámicos por days_out
-    Un suelo de 362€ tiene sentido a 14d, no a 150d.
-    Escalonado: 100% a <30d, 85% a 30-60d, 75% a 60-90d, 65% a >90d
-    Permite capturar early bookers a precio atractivo en temporadas lejanas.
-  - P6: Early bird para sep-oct abandonados
-    Cuando days_out > 60 y occ < 0.15 y temporada MA/A:
-    bajar precio base un escalón para capturar primeras reservas.
-    Una vez entran las primeras, el motor sube naturalmente.
-  - fOTB/fPick/fPace ahora se propagan correctamente al output
+CAMBIOS v7.6 vs v7.5:
+  - rank_nights Market Share Corrector del pace
+    Si BOOKING_ANALYTICS indica que somos bien elegidos relativamente
+    (rank_nights en top 50% del mercado BDC), se atenúa la penalización
+    de pace cuando ajuste_pace < 1.0.
+    Lógica: el problema puede ser el mercado, no nuestra propiedad.
+    Modifier: 0.80–1.0 sobre la penalización (nunca convierte penalización en bonus).
+    Nuevo campo en desglose: "rankNightsMod" para trazabilidad en explicacion.py.
 """
 
 import logging
@@ -46,6 +44,55 @@ def get_season_code(d):
         from rms.utils import parse_date
         d = parse_date(d)
     return config.SEASON_CODE[d.month]
+
+
+def get_rank_nights_pace_modifier(month: int) -> float:
+    """
+    v7.6: Market Share Corrector del pace.
+
+    Si nuestro rank_nights en BDC indica que el mercado nos está eligiendo
+    proporcionalmente (rank alto percentil = somos más elegidos que la media),
+    reducimos la penalización de pace. Lógica:
+
+      - El pace compara OTB actual vs año anterior para NUESTRA propiedad.
+      - Si pace_ratio < 1 (vamos lentos vs LY), ajuste_pace < 1 → baja precio.
+      - Pero si el mercado entero va más lento y nosotros seguimos siendo
+        relativamente bien elegidos (rank_nights bueno), no debemos penalizarnos.
+
+    El modifier opera como atenuador de la penalización, nunca como booster:
+      - modifier = 1.0  → pace se aplica sin cambios (mercado neutro o sin datos)
+      - modifier < 1.0  → penalización de pace se atenúa (estamos bien posicionados)
+      - Solo actúa cuando ajuste_pace < 1.0 (hay penalización real)
+
+    Fórmula:
+      percentil = (total_props - rank_nights) / (total_props - 1)
+        → rank 1/26 = percentil 1.0 (mejor), rank 26/26 = 0.0 (peor)
+      modifier = 1.0 - (percentil - UMBRAL) * FUERZA   [clampado a [0.5, 1.0]]
+
+    UMBRAL = 0.5 → solo actúa si estamos en la mitad superior del mercado
+    FUERZA = 0.4 → máxima atenuación: percentil 1.0 → modifier = 0.80
+                   (reduce la penalización un 20% como máximo)
+    """
+    ba = config.BOOKING_ANALYTICS.get(month)
+    if not ba:
+        return 1.0  # Sin datos: no intervenir
+
+    rank = ba["rank_nights"]
+    total = ba["total_props"]
+    if total <= 1:
+        return 1.0
+
+    # percentil: 1.0 = mejor posición (rank 1), 0.0 = peor (rank total)
+    percentil = (total - rank) / (total - 1)
+
+    UMBRAL = 0.50   # Solo actúa si estamos en top 50% del mercado
+    FUERZA = 0.40   # Máxima reducción de penalización: 20% (cuando percentil=1.0)
+
+    if percentil <= UMBRAL:
+        return 1.0  # Estamos en la mitad inferior → no atenuar, pace opera normal
+
+    modifier = 1.0 - (percentil - UMBRAL) * FUERZA
+    return clamp(0.80, modifier, 1.0)
 
 
 # ══════════════════════════════════════════
@@ -234,6 +281,7 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
     occ_actual = reservadas / config.TOTAL_UNITS
 
     # Pace — v7.4: referencia multi-año ponderada
+    # v7.6: atenuación por rank_nights (market share corrector)
     ajuste_pace = 1.0
     if pace_data and date_str in pace_data:
         otb_ref = pace_data[date_str]
@@ -246,6 +294,21 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
             )
             if days_out > 90:
                 ajuste_pace = 1.0 + (ajuste_pace - 1.0) * 0.5
+
+            # v7.6: Si el mercado nos elige bien (rank_nights bueno),
+            # atenuar la penalización — el problema es el mercado, no nosotros.
+            # Solo aplica cuando hay penalización real (ajuste_pace < 1.0).
+            if ajuste_pace < 1.0:
+                rank_mod = get_rank_nights_pace_modifier(fecha.month)
+                if rank_mod < 1.0:
+                    # Atenuar: reducir la distancia negativa desde 1.0
+                    penalizacion = ajuste_pace - 1.0          # valor negativo
+                    penalizacion_atenuada = penalizacion * rank_mod
+                    ajuste_pace = clamp(
+                        cfg["PACE_MIN"],
+                        1.0 + penalizacion_atenuada,
+                        1.0  # techo: nunca convertir penalización en bonus
+                    )
 
     # Pickup — v7.5: now actually works with persistent snapshots
     ajuste_pickup = 1.0
@@ -274,6 +337,9 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
     demanda_incremental = max(0, min(demanda_total - reservadas, disponibles))
     demanda_incremental = round(demanda_incremental, 1)
 
+    # v7.6: capturar rank_mod para el output (siempre calcularlo aquí para el desglose)
+    _rank_mod_output = get_rank_nights_pace_modifier(fecha.month)
+
     return {
         "demanda": demanda_incremental,
         "demandaTotal": round(demanda_total, 1),
@@ -285,6 +351,7 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
             "evento": round(ajuste_evento, 3),
             "vac": round(ajuste_vac, 3),
             "market": round(ajuste_market, 3),
+            "rankNightsMod": round(_rank_mod_output, 3),  # v7.6: market share corrector
         },
         "eventInfo": event_info,
         "seasonCode": season_code,
