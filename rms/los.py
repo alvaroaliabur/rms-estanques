@@ -189,7 +189,10 @@ def _detect_gaps_upper(gaps, otb_upper, today, horizon):
             min_stay_gap = default_ms
             premium_gap = 1.08 if di < 14 else 1.05
 
-        gaps[date_str] = {
+        # Fill ALL days of the gap with the same minStay.
+        # Without this, only day 1 gets the reduced minStay;
+        # days 2..N revert to default and the gap stays unsellable.
+        gap_entry = {
             "gapLength": gap_length,
             "daysOut": di,
             "disponibles": disponibles,
@@ -198,6 +201,9 @@ def _detect_gaps_upper(gaps, otb_upper, today, horizon):
             "roomType": "upper",
             "surrounded": is_surrounded,
         }
+        for gdi in range(gap_length):
+            gd_str = fmt(today + timedelta(days=di + gdi))
+            gaps[gd_str] = {**gap_entry, "daysOut": di + gdi}
 
         di += gap_length
 
@@ -242,35 +248,41 @@ def _detect_gaps_ground(gaps, otb_ground, today, horizon):
         season_code = config.SEASON_CODE[d.month]
         default_ms = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
-        # Ground floor: always set minStay to fit the gap
+        # Ground floor: minStay = gap_length always.
+        # The gap IS the constraint — never set minStay > gap_length
+        # or the gap becomes unsellable.
         if gap_length < default_ms:
             min_stay_gap = max(gf_absolute_min, gap_length)
             premium_gap = 1.18 if gap_length <= 2 else 1.10
         else:
-            min_stay_gap = max(gf_absolute_min, default_ms - 1)
+            # Gap fits default or longer — use default (not default-1)
+            min_stay_gap = max(gf_absolute_min, default_ms)
             premium_gap = 1.05
 
         # Only add to gaps dict if it improves on existing entry
         # (upper floor might have already set a gap for this date)
-        existing = gaps.get(date_str)
-        if not existing or min_stay_gap < existing.get("minStayGapGround", 99):
+        # Fill ALL days of the gap for ground floor too.
+        for gdi in range(gap_length):
+            gd = today + timedelta(days=di + gdi)
+            gd_str = fmt(gd)
+            existing = gaps.get(gd_str)
             if existing:
                 # Merge: keep upper info, add ground info
                 existing["minStayGapGround"] = min_stay_gap
                 existing["premiumGapGround"] = premium_gap
                 existing["gapLengthGround"] = gap_length
             else:
-                gaps[date_str] = {
+                gaps[gd_str] = {
                     "gapLength": gap_length,
-                    "daysOut": di,
+                    "daysOut": di + gdi,
                     "disponibles": disponibles,
-                    "minStayGap": min_stay_gap,  # For upper (default)
+                    "minStayGap": min_stay_gap,
                     "premiumGap": premium_gap,
                     "minStayGapGround": min_stay_gap,
                     "premiumGapGround": premium_gap,
                     "gapLengthGround": gap_length,
                     "roomType": "ground",
-                    "surrounded": True,  # 1 unit, any gap is real
+                    "surrounded": True,
                 }
 
         di += gap_length
