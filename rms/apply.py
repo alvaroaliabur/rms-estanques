@@ -49,22 +49,25 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
     """
     Slots abiertos según la mínima estancia REAL del día.
 
-    La tarifa de entrada es la que coincide con el minStay.
-    Las tarifas de duración superior ofrecen descuentos progresivos.
+    Beds24 Daily Price Rules tienen min/max stay por tarifa:
+      Standard = 1-3 noches, 4N = 4 noches, 5N = 5, 6N = 6, 7N = 7+
 
     Regla completa:
-      min_stay=2 → Standard + 4N + 5N + 6N + 7N
-      min_stay=3 → Standard + 4N + 5N + 6N + 7N
+      min_stay=2 → Standard solo (huésped busca 2-3N, no aplican 4N+)
+      min_stay=3 → Standard + 4N + 5N + 6N + 7N (todo abierto)
       min_stay=4 → 4N + 5N + 6N + 7N  (Standard cerrada)
-      min_stay=5 → 5N + 6N + 7N        (Standard y 4N cerradas)
-      min_stay=6 → 6N + 7N             (Standard, 4N, 5N cerradas)
-      min_stay=7 → 7N                  (solo Semanal)
+      min_stay=5 → 5N + 6N + 7N
+      min_stay=6 → 6N + 7N
+      min_stay=7 → 7N solo
 
-    Excepción: si quedan <=2 disponibles, cerrar todos los descuentos.
+    Excepción: si quedan <=2 disponibles, solo la tarifa de entrada.
     """
+    if min_stay is None:
+        min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
+
     if disponibles <= 2:
-        # Protect revenue: only the entry-level rate, no discounts for longer stays
-        entry = _get_entry_slot(min_stay or config.DEFAULT_MIN_STAY.get(season_code, 3))
+        # Protect revenue: only the entry-level rate, no discounts
+        entry = _get_entry_slot(min_stay)
         return {
             "STANDARD": entry == "STANDARD",
             "4NOCHES":  entry == "4NOCHES",
@@ -73,10 +76,18 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
             "SEMANAL":  entry == "SEMANAL",
         }
 
-    if min_stay is None:
-        from rms import config
-        min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
+    if min_stay <= 2:
+        # Solo estancias cortas — no ofrecer descuentos de larga duración
+        return {
+            "STANDARD": True,
+            "4NOCHES":  False,
+            "5NOCHES":  False,
+            "6NOCHES":  False,
+            "SEMANAL":  False,
+        }
 
+    # min_stay >= 3: Standard abierta si min_stay == 3, cerrada si > 3
+    # Cada tarifa de duración abierta si min_stay <= su duración
     return {
         "STANDARD": min_stay <= 3,
         "4NOCHES":  min_stay <= 4,
