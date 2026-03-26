@@ -1,12 +1,16 @@
 """
-Revenue Tracker + Feedback — v7.5
+Revenue Tracker + Feedback — v7.6
 
-CAMBIOS v7.5 vs v7.3:
-  - P4: Feedback persistente via Google Sheets
-    _price_history se perdía en cada redeploy (128+ deploys).
-    Ahora guarda historial de precios en pestaña "price_history" de Sheets.
-    check_feedback() puede comparar precios de hoy vs hace 14 días reales.
-  - Resto sin cambios vs v7.3
+CAMBIOS v7.6 vs v7.5:
+  - REVENUE POR NOCHE DE ESTANCIA (no por mes de check-in)
+    Una reserva 30-jul→5-ago genera 2 noches en julio + 5 noches en agosto.
+    Antes toda la reserva iba al mes de llegada → agosto siempre sobreestimado,
+    julio subestimado. Ahora el revenue se distribuye proporcionalmente por noches.
+  - ADR REAL CONFIRMADO expuesto en tracker
+    ty_adr / best_adr / ly_adr = revenue_confirmado / noches_vendidas.
+    Solo 3 canales: booking (17%), airbnb (3%), direct (0%).
+    Todo lo que no sea Booking ni Airbnb se clasifica como directo.
+  - RevPAR añadido al tracker: revenue / (9 aptos × días del mes).
 """
 
 import logging
@@ -51,7 +55,6 @@ def _save_price_history_sheets(results):
 
         today_str = date.today().isoformat()
 
-        # Build compact price snapshot: {date: {price, disp}}
         snapshot = {}
         for r in results:
             snapshot[r["date"]] = {
@@ -59,7 +62,6 @@ def _save_price_history_sheets(results):
                 "d": r.get("disponibles", 0),
             }
 
-        # Find or append row
         all_rows = tab.get_all_values()
         row_idx = None
         for i, row in enumerate(all_rows):
@@ -75,7 +77,6 @@ def _save_price_history_sheets(results):
         else:
             tab.append_row([today_str, prices_json])
 
-        # Clean old (keep 30 days for feedback window)
         cutoff = (date.today() - timedelta(days=30)).isoformat()
         rows_to_delete = []
         for i, row in enumerate(all_rows):
@@ -116,7 +117,6 @@ def _load_price_history_sheets(days_ago=14):
         target_date = (date.today() - timedelta(days=days_ago)).isoformat()
 
         all_rows = tab.get_all_values()
-        # Find closest date to target
         best_row = None
         best_diff = 999
         for i, row in enumerate(all_rows):
@@ -140,6 +140,19 @@ def _load_price_history_sheets(days_ago=14):
 # ══════════════════════════════════════════
 # REVENUE TRACKER — vs BEST year
 # ══════════════════════════════════════════
+
+def _classify_channel(channel_raw):
+    """
+    Solo 3 canales: booking, airbnb, direct.
+    Todo lo que no sea Booking ni Airbnb es reserva directa.
+    """
+    s = (channel_raw or "").strip().lower()
+    if "booking" in s:
+        return "booking"
+    if "airbnb" in s:
+        return "airbnb"
+    return "direct"
+
 
 def _fetch_bookings_for_year(year):
     bookings = []
@@ -169,14 +182,7 @@ def _fetch_bookings_for_year(year):
 
             if nights > 0 and price > 0:
                 channel_raw = (b.get("apiSource") or "").strip().lower()
-                if not channel_raw or channel_raw == "direct":
-                    channel = "direct"
-                elif "booking" in channel_raw:
-                    channel = "booking"
-                elif "airbnb" in channel_raw:
-                    channel = "airbnb"
-                else:
-                    channel = channel_raw
+                channel = _classify_channel(channel_raw)
 
                 bookings.append({
                     "ci": ci, "co": co,
@@ -185,14 +191,92 @@ def _fetch_bookings_for_year(year):
                     "year": year, "month": ci.month,
                     "channel": channel,
                 })
+
     except Exception as e:
         log.warning(f"  Error fetching {year} bookings: {e}")
 
     return bookings
 
 
+def _revenue_by_month(bookings):
+    """
+    Distribuye revenue por NOCHE DE ESTANCIA, no por mes de check-in.
+
+    Una reserva ci=2025-07-30, co=2025-08-05, precio=800€, noches=6:
+      - julio recibe  2 noches → 2/6 × 800 = 266.67€
+      - agosto recibe 4 noches → 4/6 × 800 = 533.33€  (+ noche 6 del 4-ago: 5 noches)
+    Así el revenue mensual refleja exactamente cuándo duerme el huésped.
+    """
+    by_month = defaultdict(lambda: {"revenue": 0.0, "nights": 0})
+    for b in bookings:
+        ci = b["ci"]
+        co = b["co"]
+        total_nights = b["nights"]
+        ppn = b["price"] / total_nights  # precio por noche
+
+        # Iterate day by day (check-in night = ci, last night = co - 1 day)
+        current = ci
+        while current < co:
+            m = current.month
+            by_month[m]["revenue"] += ppn
+            by_month[m]["nights"] += 1
+            current += timedelta(days=1)
+
+    # Round revenue at the end
+    return {m: {"revenue": round(v["revenue"], 2), "nights": v["nights"]}
+            for m, v in by_month.items()}
+
+
+def _channel_breakdown(bookings):
+    """Channel breakdown also distributed by stay night."""
+    COMMISSION = {
+        "booking": 0.17,
+        "airbnb": 0.155,  # Host-only fee desde oct 2025 (PMS-connected)
+        "direct": 0.00,
+    }
+    by_month = defaultdict(lambda: defaultdict(lambda: {"revenue": 0.0, "nights": 0, "count": 0}))
+
+    for b in bookings:
+        ci = b["ci"]
+        co = b["co"]
+        total_nights = b["nights"]
+        ppn = b["price"] / total_nights
+        ch = b.get("channel", "direct")
+
+        current = ci
+        first_night = True
+        while current < co:
+            m = current.month
+            by_month[m][ch]["revenue"] += ppn
+            by_month[m][ch]["nights"] += 1
+            if first_night:
+                by_month[m][ch]["count"] += 1  # count reserva once (on check-in month)
+                first_night = False
+            current += timedelta(days=1)
+
+    result = {}
+    for m, channels in by_month.items():
+        total_rev = sum(ch["revenue"] for ch in channels.values())
+        month_data = {}
+        for ch_name, ch_data in channels.items():
+            comm_rate = COMMISSION.get(ch_name, 0.15)
+            net_rev = ch_data["revenue"] * (1 - comm_rate)
+            adr = round(ch_data["revenue"] / ch_data["nights"]) if ch_data["nights"] > 0 else 0
+            net_adr = round(net_rev / ch_data["nights"]) if ch_data["nights"] > 0 else 0
+            pct = round(ch_data["revenue"] / total_rev * 100) if total_rev > 0 else 0
+            month_data[ch_name] = {
+                "revenue": round(ch_data["revenue"]), "net_revenue": round(net_rev),
+                "nights": ch_data["nights"], "count": ch_data["count"],
+                "adr": adr, "net_adr": net_adr, "pct_revenue": pct,
+                "commission_rate": comm_rate,
+            }
+        result[m] = month_data
+
+    return result
+
+
 def calcular_revenue_tracker():
-    log.info("══ REVENUE TRACKER v7.5 ══")
+    log.info("══ REVENUE TRACKER v7.6 ══")
 
     today = date.today()
     current_year = today.year
@@ -226,12 +310,19 @@ def calcular_revenue_tracker():
         ty = rev_by_year.get(current_year, {}).get(m, {"revenue": 0, "nights": 0})
         ty_rev = ty["revenue"]
         ty_nights = ty["nights"]
+        # ADR REAL: revenue confirmado / noches vendidas (no precio cotizado)
         ty_adr = round(ty_rev / ty_nights) if ty_nights > 0 else 0
+        # RevPAR: revenue por unidad disponible por noche del mes
+        import calendar
+        days_in_month = calendar.monthrange(current_year, m)[1]
+        total_available_nights = config.TOTAL_UNITS * days_in_month
+        ty_revpar = round(ty_rev / total_available_nights) if total_available_nights > 0 else 0
 
         best_rev = 0
         best_year = current_year - 1
         best_nights = 0
         best_adr = 0
+        best_revpar = 0
 
         for hy in historical_years:
             hy_data = rev_by_year.get(hy, {}).get(m, {"revenue": 0, "nights": 0})
@@ -240,6 +331,9 @@ def calcular_revenue_tracker():
                 best_year = hy
                 best_nights = hy_data["nights"]
                 best_adr = round(hy_data["revenue"] / hy_data["nights"]) if hy_data["nights"] > 0 else 0
+                hy_days = calendar.monthrange(hy, m)[1]
+                hy_avail = config.TOTAL_UNITS * hy_days
+                best_revpar = round(best_rev / hy_avail) if hy_avail > 0 else 0
 
         ly = rev_by_year.get(current_year - 1, {}).get(m, {"revenue": 0, "nights": 0})
         ly_rev = ly["revenue"]
@@ -265,9 +359,10 @@ def calcular_revenue_tracker():
         tracker[m] = {
             "name": month_names[m - 1],
             "ty_revenue": round(ty_rev), "ty_nights": ty_nights, "ty_adr": ty_adr,
+            "ty_revpar": ty_revpar,
             "ly_revenue": round(ly_rev), "ly_nights": ly_nights, "ly_adr": ly_adr,
             "best_revenue": round(best_rev), "best_year": best_year,
-            "best_nights": best_nights, "best_adr": best_adr,
+            "best_nights": best_nights, "best_adr": best_adr, "best_revpar": best_revpar,
             "diff_pct": diff_pct, "diff_vs_ly": diff_vs_ly,
             "compare_year": best_year, "status": status,
             "channels_ty": channel_ty.get(m, {}),
@@ -282,51 +377,12 @@ def calcular_revenue_tracker():
     for m in range(max(1, today.month - 1), min(13, today.month + 4)):
         t = tracker.get(m)
         if t and (t["ty_revenue"] > 0 or t["best_revenue"] > 0):
-            log.info(f"    {t['name']}: {t['ty_revenue']:,.0f}€ vs {t['best_revenue']:,.0f}€ "
-                     f"best({t['best_year']}) ({t['diff_pct']:+d}%) — {t['status']}")
+            log.info(
+                f"    {t['name']}: {t['ty_revenue']:,.0f}€ ADR {t['ty_adr']}€ RevPAR {t['ty_revpar']}€ "
+                f"vs best({t['best_year']}) {t['best_revenue']:,.0f}€ ({t['diff_pct']:+d}%) — {t['status']}"
+            )
 
     return tracker
-
-
-def _revenue_by_month(bookings):
-    by_month = defaultdict(lambda: {"revenue": 0, "nights": 0})
-    for b in bookings:
-        m = b.get("month", b["ci"].month)
-        by_month[m]["revenue"] += b["price"]
-        by_month[m]["nights"] += b["nights"]
-    return dict(by_month)
-
-
-def _channel_breakdown(bookings):
-    COMMISSION = {"booking": 0.17, "airbnb": 0.03, "direct": 0.00}
-    by_month = defaultdict(lambda: defaultdict(lambda: {"revenue": 0, "nights": 0, "count": 0}))
-
-    for b in bookings:
-        m = b.get("month", b["ci"].month)
-        ch = b.get("channel", "direct")
-        by_month[m][ch]["revenue"] += b["price"]
-        by_month[m][ch]["nights"] += b["nights"]
-        by_month[m][ch]["count"] += 1
-
-    result = {}
-    for m, channels in by_month.items():
-        total_rev = sum(ch["revenue"] for ch in channels.values())
-        month_data = {}
-        for ch_name, ch_data in channels.items():
-            comm_rate = COMMISSION.get(ch_name, 0.15)
-            net_rev = ch_data["revenue"] * (1 - comm_rate)
-            adr = round(ch_data["revenue"] / ch_data["nights"]) if ch_data["nights"] > 0 else 0
-            net_adr = round(net_rev / ch_data["nights"]) if ch_data["nights"] > 0 else 0
-            pct = round(ch_data["revenue"] / total_rev * 100) if total_rev > 0 else 0
-            month_data[ch_name] = {
-                "revenue": round(ch_data["revenue"]), "net_revenue": round(net_rev),
-                "nights": ch_data["nights"], "count": ch_data["count"],
-                "adr": adr, "net_adr": net_adr, "pct_revenue": pct,
-                "commission_rate": comm_rate,
-            }
-        result[m] = month_data
-
-    return result
 
 
 def calcular_otb_futuro():
@@ -334,6 +390,7 @@ def calcular_otb_futuro():
     current_year = today.year
     ty_bookings = _fetch_bookings_for_year(current_year)
     ly_bookings = _fetch_bookings_for_year(current_year - 1)
+    # Only future check-ins for TY, full year for LY
     ty_future = [b for b in ty_bookings if b["ci"] > today]
     ty_by_month = _revenue_by_month(ty_future)
     ly_by_month = _revenue_by_month(ly_bookings)
@@ -351,7 +408,7 @@ def calcular_otb_futuro():
 
 
 # ══════════════════════════════════════════
-# FEEDBACK — v7.5 with Sheets persistence
+# FEEDBACK — v7.5 with Sheets persistence (unchanged)
 # ══════════════════════════════════════════
 
 def record_prices(results):
@@ -367,7 +424,6 @@ def record_prices(results):
             "disponibles": r.get("disponibles", 0),
         })
 
-    # Also persist to Sheets
     _save_price_history_sheets(results)
 
 
@@ -377,7 +433,6 @@ def check_feedback(results, otb):
     """
     suggestions = []
 
-    # Try to load 14-day-old prices from Sheets
     old_prices_sheets = _load_price_history_sheets(days_ago=14)
 
     for r in results:
@@ -390,7 +445,6 @@ def check_feedback(results, otb):
         current_price = r["precioFinal"]
         current_disp = r.get("disponibles", 9)
 
-        # Try in-memory first
         old_price = None
         old_disp = None
         history = _price_history.get(d_str, [])
@@ -399,7 +453,6 @@ def check_feedback(results, otb):
             old_price = old_entry["price"]
             old_disp = old_entry["disponibles"]
 
-        # Fallback to Sheets
         if old_price is None and old_prices_sheets and d_str in old_prices_sheets:
             old_data = old_prices_sheets[d_str]
             old_price = old_data.get("p")
@@ -423,7 +476,9 @@ def check_feedback(results, otb):
     if suggestions:
         log.info(f"  📉 Feedback: {len(suggestions)} fechas sin pickup tras subida")
         for s in suggestions[:3]:
-            log.info(f"    {s['date']}: {s['old_price']}€→{s['current_price']}€ (+{s['increase_pct']}%), "
-                     f"disp={s['disponibles']}, via {s['source']}")
+            log.info(
+                f"    {s['date']}: {s['old_price']}€→{s['current_price']}€ (+{s['increase_pct']}%), "
+                f"disp={s['disponibles']}, via {s['source']}"
+            )
 
     return suggestions
