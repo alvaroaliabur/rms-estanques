@@ -258,14 +258,11 @@ WEEKEND_FLOOR_PREMIUM = {
 # ══════════════════════════════════════════
 PRICE_PROTECTION_BY_DAYS = {60: 0.95, 30: 0.85, 14: 0.75, 7: 0.60, 0: 0.00}
 # BUSINESS RULE: minimum 300€ net per booking after Booking.com commission (15%).
-# Formula: MIN_NET_PER_BOOKING / (1 - BOOKING_COMMISSION) = min published revenue per booking.
 # 300 / 0.85 = 353€ published minimum per booking.
-# With minStay=2 (absolute minimum): 353/2 = 177€/night minimum.
-# All MIN_BOOKING_REVENUE values below must satisfy: value * 0.85 >= 300.
+# All values below satisfy: value * 0.85 >= 300.
 MIN_NET_PER_BOOKING = 300      # €, net to owner after Booking.com commission
 BOOKING_COMMISSION = 0.15      # 15% Booking.com standard commission
 MIN_BOOKING_REVENUE = {
-    # Revenue total en precio publicado. Neto = valor × 0.85 >= 300€ en todas.
     "B": 362, "MB": 362, "M": 550, "MA": 700, "A": 950, "UA": 2100,
 }
 GENIUS_COMPENSATION = 1.18
@@ -280,7 +277,10 @@ ADR_HISTORICAL_MIN = {
 # ══════════════════════════════════════════
 # MIN STAY
 # ══════════════════════════════════════════
-DEFAULT_MIN_STAY = {"B": 3, "MB": 3, "M": 3, "MA": 4, "A": 5, "UA": 7}
+# minStay = estancia mínima para la tarifa STANDARD (price1).
+# UA/A: 5n mínimo — captura semanas cortas DE/NL con 4+ aptos libres.
+# El motor sube automáticamente cuando occ >= OCC_SUBIR_MINSTAY (85% UA).
+DEFAULT_MIN_STAY = {"B": 2, "MB": 2, "M": 3, "MA": 3, "A": 5, "UA": 5}
 MIN_STAY_REDUCTION = {
     "threshold_high": 0.70, "threshold_vhigh": 0.85,
     "absolute_min": 3, "absolute_min_winter": 3,
@@ -292,7 +292,9 @@ MIN_STAY_REDUCTION = {
 # ══════════════════════════════════════════
 LOS_DINAMICO = {
     "enabled": True,
-    "ABSOLUTE_MIN": {"UA": 3, "A": 3, "MA": 3, "M": 3, "MB": 3, "B": 3},
+    # ABSOLUTE_MIN: nunca bajar de aquí aunque el LOS dinámico lo pida.
+# BUSINESS RULE: nunca 1 noche en ningún caso.
+"ABSOLUTE_MIN": {"UA": 5, "A": 5, "MA": 3, "M": 3, "MB": 2, "B": 2},
     "ESCALONES": [
         {"nombre": "HORIZONTE_LARGO", "dias_max": 999, "dias_min": 31,
          "reduccion": 0, "precio_premium": 1.00, "requiere_occ_baja": False},
