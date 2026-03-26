@@ -1,16 +1,16 @@
 """
-RMS v7.4 Pricing Engine — Forecast → Optimize → Execute → Smooth
+RMS v7.5 Pricing Engine — Forecast → Optimize → Execute → Smooth
 
-CAMBIOS v7.4:
-  - Urgency eliminado como amplificador separado
-    Era redundante con fOTB/fPace y causaba subidas en fechas que necesitaban bajar
-    La presión temporal ahora está integrada en fOTB directamente
-  - fOTB last-minute: cuando days_out < 30 y occ < expected → sensibilidad x1.5
-    El sistema baja más agresivamente cuando va retrasado cerca de la fecha
-  - Comp set adj desactivado en UA/A
-    Estanques es premium +15-19% sobre peers — eso es CORRECTO en verano
-    Ratio 1.25 anterior penalizaba exactamente nuestro posicionamiento correcto
-  - HISTORICAL_YEARS=[2023,2024,2025] ya integrado via config + otb.py
+CAMBIOS v7.5 vs v7.4:
+  - P3: Suelos dinámicos por days_out
+    Un suelo de 362€ tiene sentido a 14d, no a 150d.
+    Escalonado: 100% a <30d, 85% a 30-60d, 75% a 60-90d, 65% a >90d
+    Permite capturar early bookers a precio atractivo en temporadas lejanas.
+  - P6: Early bird para sep-oct abandonados
+    Cuando days_out > 60 y occ < 0.15 y temporada MA/A:
+    bajar precio base un escalón para capturar primeras reservas.
+    Una vez entran las primeras, el motor sube naturalmente.
+  - fOTB/fPick/fPace ahora se propagan correctamente al output
 """
 
 import logging
@@ -122,6 +122,100 @@ def get_market_factor(date_str):
 
 
 # ══════════════════════════════════════════
+# P3: DYNAMIC FLOOR BY DAYS_OUT
+#
+# Un suelo de 362€ es correcto a 14 días vista.
+# A 150 días, con 8 disp, bloquea early bookers.
+# Escalonado:
+#   <30 días:  100% del suelo (protección máxima)
+#   30-60 días: 85% (ligera flexibilidad)
+#   60-90 días: 75% (capturar demanda temprana)
+#   >90 días:  65% (early bird agresivo)
+#
+# Solo aplica a meses de alta/ultra alta temporada.
+# En baja temporada los suelos ya son bajos — no tocar.
+# ══════════════════════════════════════════
+
+FLOOR_DISCOUNT_BY_DAYS_OUT = {
+    # (min_days, max_days): factor
+    (0, 29): 1.00,    # Protección total
+    (30, 59): 0.85,   # Ligera flexibilidad
+    (60, 89): 0.75,   # Capturar demanda temprana
+    (90, 999): 0.65,  # Early bird
+}
+
+# Temporadas donde aplicar suelo dinámico (las que tienen suelos altos)
+FLOOR_DYNAMIC_SEASONS = ("UA", "A", "MA")
+
+
+def get_dynamic_floor_factor(days_out, season_code):
+    """
+    Returns factor to apply to the monthly floor based on how far out the date is.
+    Only for high-season months where floors are meaningful.
+    """
+    if season_code not in FLOOR_DYNAMIC_SEASONS:
+        return 1.0  # Low season: don't touch floors
+
+    for (lo, hi), factor in FLOOR_DISCOUNT_BY_DAYS_OUT.items():
+        if lo <= days_out <= hi:
+            return factor
+
+    return 1.0
+
+
+# ══════════════════════════════════════════
+# P6: EARLY BIRD — Sep/Oct strategy
+#
+# Problem: Sep 15-30 and all of Oct show 8 disp, all SUELO, pace 1.0
+# at 5-6 months out. The motor has no strategy for far-out empty periods.
+#
+# Solution: When a date is far out (>60d), nearly empty (<15% occ),
+# and in a shoulder season (MA, A), lower the starting price by one
+# availability step to make it more attractive for first movers.
+# Once bookings come in, the motor naturally raises prices.
+# ══════════════════════════════════════════
+
+EARLY_BIRD = {
+    "enabled": True,
+    "min_days_out": 60,         # Only for dates > 60 days away
+    "max_occ_threshold": 0.15,  # Only when < 15% occupied
+    "seasons": ("A", "MA"),     # Sep=A, Oct=MA
+    "escalones_bajar": 2,       # Use price for 2 more units available
+    "factor_directo": 0.90,     # Fallback: 10% discount if no ppd table
+}
+
+
+def _apply_early_bird(precio_base, days_out, season_code, reservadas, ppd):
+    """Apply early bird discount for far-out empty shoulder season dates."""
+    cfg = EARLY_BIRD
+    if not cfg["enabled"]:
+        return precio_base
+
+    if days_out < cfg["min_days_out"]:
+        return precio_base
+
+    if season_code not in cfg["seasons"]:
+        return precio_base
+
+    occ = reservadas / config.TOTAL_UNITS
+    if occ >= cfg["max_occ_threshold"]:
+        return precio_base  # Already has bookings, no early bird needed
+
+    # Lower price using ppd table
+    disponibles = config.TOTAL_UNITS - reservadas
+    disp_early = min(config.TOTAL_UNITS, disponibles + cfg["escalones_bajar"])
+
+    if ppd and disp_early in ppd:
+        p = ppd[disp_early]
+        precio_early = p["precio"] if isinstance(p, dict) else p
+        # Blend: 50% early bird price, 50% base
+        return round(precio_base * 0.50 + precio_early * 0.50)
+
+    # Fallback: direct factor
+    return round(precio_base * cfg["factor_directo"])
+
+
+# ══════════════════════════════════════════
 # MODULE 1: FORECAST
 # ══════════════════════════════════════════
 
@@ -153,7 +247,7 @@ def forecast(fecha, fill_curves, pace_data, pickup_data, otb, events):
             if days_out > 90:
                 ajuste_pace = 1.0 + (ajuste_pace - 1.0) * 0.5
 
-    # Pickup
+    # Pickup — v7.5: now actually works with persistent snapshots
     ajuste_pickup = 1.0
     if pickup_data and date_str in pickup_data:
         pickup = pickup_data[date_str]
@@ -221,7 +315,6 @@ def optimize(fecha, fc, otb):
     disponibles_real = max(0, min(config.TOTAL_UNITS, config.TOTAL_UNITS - reservadas))
     disponibles = max(1, disponibles_real)
 
-    # Precio base desde Capa A
     ppd = pricing.get("preciosPorDisp")
     if ppd and disponibles in ppd:
         p = ppd[disponibles]
@@ -229,7 +322,7 @@ def optimize(fecha, fc, otb):
     else:
         precio_base = pricing.get("base", 100)
 
-    # Ajuste forecast (disponibilidad virtual)
+    # Forecast: disponibilidad virtual
     demanda_inc = fc["demanda"]
     disp_virtual = max(1, round(disponibles - demanda_inc))
     disp_virtual = min(disp_virtual, config.TOTAL_UNITS)
@@ -246,20 +339,22 @@ def optimize(fecha, fc, otb):
     if unc_uplift > 1.0:
         precio_base = round(precio_base * unc_uplift)
 
-    # v7.4: Comp set adj desactivado en UA/A — el premium de verano es correcto
-    # En B/MB/M/MA: aplicar solo si ratio > 1.60 (antes 1.25/1.40)
+    # Comp set adj desactivado en UA/A
     ajuste_cs = 1.0
     if season_code not in ("UA", "A"):
         ajuste_cs = _comp_set_adjustment(date_str, precio_base)
         if ajuste_cs < 1.0:
             precio_base = round(precio_base * ajuste_cs)
 
-    # v7.4: Presión temporal integrada en precio base
-    # Cuando days_out < 30 y vas retrasado vs fill curve → bajar más agresivamente
-    # Esto reemplaza la urgency anterior que amplificaba en ambas direcciones
+    # Presión temporal (v7.4)
     precio_base = _aplicar_presion_temporal(
         precio_base, days_out, season_code,
         reservadas, fc["occEsperada"], ppd
+    )
+
+    # P6: Early bird para fechas lejanas vacías en shoulder season
+    precio_base = _apply_early_bird(
+        precio_base, days_out, season_code, reservadas, ppd
     )
 
     return {
@@ -275,72 +370,45 @@ def optimize(fecha, fc, otb):
 
 
 def _aplicar_presion_temporal(precio_base, days_out, season_code, reservadas, occ_esperada, ppd):
-    """
-    v7.4: Presión de ventas integrada — reemplaza urgency.
-
-    Lógica:
-    - Si days_out < 30 y occ_actual < occ_esperada → amplificar bajada (vender)
-    - Si days_out < 30 y occ_actual > occ_esperada → mantener / subida suave
-    - En UA siempre conservador: no bajar agresivamente (el último apto vale oro)
-
-    Esto es lo que querías desde el principio: llegar a 30 días con >85% lleno,
-    no rezar a 7 días. El sistema ahora baja proactivamente a 30-60 días si va
-    retrasado vs la curva histórica, en lugar de esperar a last-minute.
-    """
+    """v7.4: Presión de ventas integrada — reemplaza urgency."""
     if days_out > 60:
         return precio_base
 
     occ_actual = reservadas / config.TOTAL_UNITS
-
-    # ¿Estamos retrasados vs la curva?
-    deficit = occ_esperada - occ_actual  # >0 = retrasado, <0 = adelantado
+    deficit = occ_esperada - occ_actual
 
     if deficit <= 0.05:
-        # En pace o adelantados — no hacer nada
         return precio_base
 
-    # Estamos retrasados. Calcular qué precio tiene el siguiente escalón de disponibilidad.
-    # La presión es: cuanto más retrasados y más cerca, más bajamos.
     if days_out <= 14:
-        # Crítico: usar precio de 2 escalones más de disponibilidad
         escalones_bajar = 2
         factor_presion = min(0.92, 1.0 - deficit * 0.8)
     elif days_out <= 30:
-        # Urgente: 1 escalón
         escalones_bajar = 1
         factor_presion = min(0.95, 1.0 - deficit * 0.5)
     else:
-        # days_out 31-60: señal suave
         escalones_bajar = 0
         factor_presion = min(0.97, 1.0 - deficit * 0.2)
 
-    # UA: conservador — la escasez en verano tiene valor, no malvender
     if season_code == "UA":
-        if occ_actual >= 0.44:  # 4/9 = ya vendiste casi la mitad
-            return precio_base  # No bajar en UA si no estás muy retrasado
-        factor_presion = max(factor_presion, 0.95)  # Bajar máximo 5%
+        if occ_actual >= 0.44:
+            return precio_base
+        factor_presion = max(factor_presion, 0.95)
 
-    # Aplicar usando tabla preciosPorDisp si existe
     if ppd and escalones_bajar > 0:
         disponibles_actual = config.TOTAL_UNITS - reservadas
         disp_presion = min(config.TOTAL_UNITS, disponibles_actual + escalones_bajar)
         if disp_presion in ppd:
             p = ppd[disp_presion]
             precio_presion = p["precio"] if isinstance(p, dict) else p
-            # Mezclar: 60% precio con presión, 40% precio base
             precio_base = round(precio_base * 0.40 + precio_presion * 0.60)
             return precio_base
 
-    # Sin tabla: aplicar factor directamente
     return round(precio_base * factor_presion)
 
 
 def _comp_set_adjustment(date_str, precio_neto):
-    """
-    v7.4: Umbrales corregidos.
-    Solo modera si estamos >60% por encima de peers (señal de fallo real).
-    En verano (UA/A) ya no llega aquí — desactivado en optimize().
-    """
+    """v7.4: Umbrales corregidos. Desactivado en UA/A."""
     cfg_cs = config.V7["COMP_SET_ADJ"]
     month = int(date_str[5:7])
     comp_mediana = config.COMP_SET["ADR_PEER"].get(month, 0)
@@ -368,7 +436,11 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
     disponibles = max(1, disponibles_real)
     occ_now = reservadas / config.TOTAL_UNITS
 
-    suelo = _get_suelo(sc, date_str)
+    # P3: Suelo dinámico por days_out
+    suelo_base = _get_suelo(sc, date_str)
+    floor_factor = get_dynamic_floor_factor(days_out, sc)
+    suelo = max(35, round(suelo_base * floor_factor))
+
     techo = _get_techo(sc, date_str)
 
     if event_info.get("floorOverride") and event_info["floorOverride"] > suelo:
@@ -455,7 +527,8 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
     return {
         "precioPublicado": precio_pub,
         "precioGenius": round(precio_pub * 0.85),
-        "suelo": suelo, "techo": techo,
+        "suelo": suelo, "sueloBase": suelo_base, "floorFactor": floor_factor,
+        "techo": techo,
         "clampedBy": clamped_by,
         "minStay": min_stay,
         "minStayGround": min_stay_ground,
@@ -564,7 +637,7 @@ def smooth(results):
 # ══════════════════════════════════════════
 
 def calcular_precios_v7(otb, events, otb_by_type=None):
-    log.info("  v7.4: Forecast → Optimización → Ejecución → Suavizado")
+    log.info("  v7.5: Forecast → Optimización → Ejecución → Suavizado")
 
     hist = fetch_historical_bookings()
     fill_curves = build_fill_curves(hist)
@@ -573,11 +646,20 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
     pickup_data = calc_pickup(otb)
     pace_data = calc_pace(hist)
 
+    # Log pickup health
+    if pickup_data:
+        log.info(f"  ✅ Pickup activo: {len(pickup_data)} fechas con datos")
+    else:
+        log.warning(f"  ⚠️ Pickup inactivo — sin snapshots históricos")
+
     today = date.today()
     results = []
     unc_count = 0
     presion_count = 0
+    early_bird_count = 0
+    dynamic_floor_count = 0
     market_adjusted = 0
+    pickup_active_count = 0
 
     for di in range(config.PRICING_HORIZON):
         d = today + timedelta(days=di)
@@ -595,7 +677,15 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
         if mf != 1.0:
             market_adjusted += 1
 
-        # Detectar si se aplicó presión temporal (precio neto < precio capa A base)
+        # Track pickup activity
+        if fc["desglose"]["pickup"] != 1.0:
+            pickup_active_count += 1
+
+        # Track dynamic floor
+        if ej.get("floorFactor", 1.0) < 1.0:
+            dynamic_floor_count += 1
+
+        # Detect presión temporal
         ppd = config.SEGMENT_BASE.get(opt["segment"], {}).get("preciosPorDisp", {})
         disp = max(1, config.TOTAL_UNITS - otb.get(date_str, 0))
         base_capa_a = ppd.get(disp, {})
@@ -603,6 +693,15 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
         presion_aplicada = isinstance(base_capa_a, (int, float)) and opt["precioNeto"] < base_capa_a * 0.98
         if presion_aplicada:
             presion_count += 1
+
+        # Detect early bird
+        early_bird_aplicado = (
+            di > 60 and
+            fc["seasonCode"] in EARLY_BIRD["seasons"] and
+            (otb.get(date_str, 0) / config.TOTAL_UNITS) < EARLY_BIRD["max_occ_threshold"]
+        )
+        if early_bird_aplicado:
+            early_bird_count += 1
 
         results.append({
             "date": date_str,
@@ -613,6 +712,8 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
             "precioFinal": ej["precioPublicado"],
             "precioGenius": ej["precioGenius"],
             "suelo": ej["suelo"],
+            "sueloBase": ej.get("sueloBase", ej["suelo"]),
+            "floorFactor": ej.get("floorFactor", 1.0),
             "seasonalFloor": ej["suelo"],
             "techo": ej["techo"],
             "minStay": ej["minStay"],
@@ -650,6 +751,7 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
             "vacFactor": fc["desglose"].get("vac", 1.0),
             "uncUplift": opt.get("uncUplift", 1.0),
             "presionTemporal": presion_aplicada,
+            "earlyBird": early_bird_aplicado,
         })
 
     results = smooth(results)
@@ -657,11 +759,17 @@ def calcular_precios_v7(otb, events, otb_by_type=None):
     for r in results:
         r["precioGenius"] = round(r["precioFinal"] * 0.85)
 
-    log.info(f"  ✅ v7.4: {len(results)} días calculados")
+    log.info(f"  ✅ v7.5: {len(results)} días calculados")
+    if pickup_active_count > 0:
+        log.info(f"  📈 Pickup activo en {pickup_active_count} fechas")
     if unc_count > 0:
         log.info(f"  📈 Demanda no restringida: {unc_count} fechas")
     if presion_count > 0:
-        log.info(f"  ⏱️ Presión temporal: {presion_count} fechas bajadas proactivamente")
+        log.info(f"  ⏱️ Presión temporal: {presion_count} fechas")
+    if early_bird_count > 0:
+        log.info(f"  🐦 Early bird: {early_bird_count} fechas con descuento anticipado")
+    if dynamic_floor_count > 0:
+        log.info(f"  📉 Suelo dinámico: {dynamic_floor_count} fechas con floor reducido")
     if market_adjusted > 0:
         log.info(f"  🌍 Market factor: {market_adjusted} fechas")
 
