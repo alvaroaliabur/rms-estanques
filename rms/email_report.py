@@ -1,9 +1,9 @@
 """
-Email Report — v7.4
-CAMBIOS:
-  - Email mensual día 1: solicita datos de Booking Analytics
-  - Formato exacto de lo que copiar/pegar desde el portal BDC
-  - Los datos se actualizan en config.BOOKING_ANALYTICS via /update endpoint
+Email Report — v7.5
+CAMBIOS vs v7.4:
+  - Sección Beat-the-Best en email diario: semáforo 🏆/🎯/⚠️ por mes
+  - Muestra OTB actual vs target (+5% mejor año) vs mejor año
+  - Señales v7.5: early bird, suelo dinámico, ajuste IA
 """
 
 import os
@@ -62,7 +62,6 @@ def es_primer_dia_del_mes():
 def enviar_email_booking_analytics():
     """
     Email mensual (día 1) pidiendo datos de Booking Analytics.
-    Formato exacto para copiar/pegar desde el portal BDC.
     """
     today = date.today()
     mes_anterior = today.month - 1 if today.month > 1 else 12
@@ -73,7 +72,6 @@ def enviar_email_booking_analytics():
     }
     mes_nombre = nombres_meses[mes_anterior]
 
-    # Datos actuales en config para mostrar referencia
     ba = config.BOOKING_ANALYTICS
     meses_verano = [6, 7, 8, 9]
 
@@ -99,7 +97,7 @@ def enviar_email_booking_analytics():
 
         <div style="background:#1a1a2e;color:white;padding:20px;border-radius:8px 8px 0 0;">
             <h1 style="margin:0;font-size:20px;">📊 Actualización mensual — Booking Analytics</h1>
-            <p style="margin:5px 0 0 0;opacity:0.8">{today.strftime('%d %B %Y')} · RMS Estanques v7.4</p>
+            <p style="margin:5px 0 0 0;opacity:0.8">{today.strftime('%d %B %Y')} · RMS Estanques v7.5</p>
         </div>
 
         <div style="background:#f8f9fa;padding:20px;">
@@ -152,17 +150,11 @@ def enviar_email_booking_analytics():
                 También puedes actualizar directamente en GitHub editando <code>rms/config.py</code> → sección <code>BOOKING_ANALYTICS</code>.
             </p>
 
-            <div style="background:#d4edda;border-left:4px solid #28a745;padding:12px 16px;border-radius:4px;margin:16px 0;">
-                <strong>¿Qué cambia cuando actualices?</strong><br>
-                El siguiente /run recalibra automáticamente los suelos de precio para los meses de verano
-                usando tu ADR real como base. Sin necesidad de tocar nada más.
-            </div>
-
         </div>
 
         <div style="background:#e9ecef;padding:12px 20px;border-radius:0 0 8px 8px;font-size:0.85em;color:#666">
-            RMS Estanques · Colònia de Sant Jordi · 
-            <a href="https://{railway_url}/health" style="color:#0f3460">Estado del sistema</a> · 
+            RMS Estanques v7.5 · Colònia de Sant Jordi ·
+            <a href="https://{railway_url}/health" style="color:#0f3460">Estado del sistema</a> ·
             <a href="https://{railway_url}/explicacion" style="color:#0f3460">Ver precios</a>
         </div>
 
@@ -172,16 +164,139 @@ def enviar_email_booking_analytics():
     return send_email(subject, html)
 
 
+def _build_btb_email_section(results):
+    """Build Beat-the-Best semaphore HTML for the daily email."""
+    btb_cfg = getattr(config, 'BEAT_THE_BEST', {})
+    if not btb_cfg.get("enabled"):
+        return ""
+
+    best_by_month = btb_cfg.get("BEST_REVENUE_BY_MONTH", {})
+    best_year_by_month = btb_cfg.get("BEST_YEAR_BY_MONTH", {})
+    uplift = btb_cfg.get("target_uplift", 1.05)
+
+    nombres = {
+        1:"Ene", 2:"Feb", 3:"Mar", 4:"Abr", 5:"May", 6:"Jun",
+        7:"Jul", 8:"Ago", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Dic"
+    }
+
+    # Revenue OTB por mes desde results
+    rev_otb = {}
+    for r in results:
+        m = int(r["date"][5:7])
+        rev_otb[m] = rev_otb.get(m, 0) + r.get("reservadas", 0) * r.get("precioFinal", 0) * 0.85
+
+    today = date.today()
+    filas = ""
+    resumen_global = {"on_track": 0, "cerca": 0, "rezagado": 0}
+
+    for m in sorted(best_by_month.keys()):
+        best = best_by_month[m]
+        if best == 0:
+            continue
+        best_year = best_year_by_month.get(m, "")
+        target = round(best * uplift)
+        actual = round(rev_otb.get(m, 0))
+        is_past = m < today.month
+
+        if is_past:
+            # Mes cerrado: mostrar resultado final
+            if actual > 0:
+                pct = round((actual - target) / target * 100)
+                color = "#27ae60" if pct >= 0 else "#e74c3c"
+                sign = "+" if pct >= 0 else ""
+                status_txt = "BATIDO" if pct >= 0 else "NO batido"
+                filas += f"""
+                <tr>
+                    <td style="padding:7px 10px;border-bottom:1px solid #eee;font-weight:600">{nombres[m]}</td>
+                    <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right">{actual:,.0f}€</td>
+                    <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;color:#888">{target:,}€</td>
+                    <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;color:#888">{best:,}€ ({best_year})</td>
+                    <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;color:{color};font-weight:600">
+                        {sign}{pct}% — {status_txt}
+                    </td>
+                </tr>"""
+            continue
+
+        if actual == 0:
+            continue
+
+        pct = round((actual - target) / target * 100)
+
+        if pct >= 0:
+            emoji = "🏆"
+            color = "#27ae60"
+            bg = "#f0fff4"
+            label = f"+{pct}% ON TRACK"
+            resumen_global["on_track"] += 1
+        elif pct >= -15:
+            emoji = "🎯"
+            color = "#e67e22"
+            bg = "#fffbf0"
+            label = f"{pct}% CERCA"
+            resumen_global["cerca"] += 1
+        else:
+            emoji = "⚠️"
+            color = "#e74c3c"
+            bg = "#fff5f5"
+            label = f"{pct}% REZAGADO"
+            resumen_global["rezagado"] += 1
+
+        falta = max(0, target - actual)
+        falta_txt = f"Faltan {falta:,.0f}€" if falta > 0 else "Superado"
+
+        filas += f"""
+        <tr style="background:{bg}">
+            <td style="padding:7px 10px;border-bottom:1px solid #eee;font-weight:600">{emoji} {nombres[m]}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;font-weight:600">{actual:,.0f}€</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;color:#555">{target:,}€</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;color:#888">{best:,}€ ({best_year})</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;color:{color};font-weight:600">
+                {label}<br>
+                <span style="font-size:0.82em;color:#888">{falta_txt}</span>
+            </td>
+        </tr>"""
+
+    if not filas:
+        return ""
+
+    # Resumen global
+    if resumen_global["rezagado"] > 0:
+        resumen_color = "#e74c3c"
+        resumen_txt = f"⚠️ {resumen_global['rezagado']} mes(es) rezagado(s) — revisar pricing y minStay"
+    elif resumen_global["cerca"] > 0:
+        resumen_color = "#e67e22"
+        resumen_txt = f"🎯 {resumen_global['cerca']} mes(es) cerca del target — monitorizar pickup"
+    else:
+        resumen_color = "#27ae60"
+        resumen_txt = f"🏆 Todos los meses activos on track para batir el mejor año"
+
+    return f"""
+    <h2 style="font-size:15px;color:#1a1a2e;margin-top:24px">🏆 Beat-the-Best (objetivo: +5% sobre mejor año)</h2>
+
+    <div style="background:{resumen_color}15;border-left:4px solid {resumen_color};padding:10px 14px;border-radius:4px;margin-bottom:12px;font-size:0.9em;color:{resumen_color};font-weight:600">
+        {resumen_txt}
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#e9ecef">
+            <th style="padding:7px 10px;text-align:left">Mes</th>
+            <th style="padding:7px 10px;text-align:right">OTB actual</th>
+            <th style="padding:7px 10px;text-align:right">Target (+5%)</th>
+            <th style="padding:7px 10px;text-align:right">Mejor año</th>
+            <th style="padding:7px 10px;text-align:center">Status</th>
+        </tr>
+        {filas}
+    </table>"""
+
+
 def enviar_email_diario(results, audit, alerts, claude_analysis=None):
-    """Email diario con resumen de precios + alerta si es día 1 del mes."""
+    """Email diario con resumen de precios + Beat-the-Best + señales v7.5."""
     today = date.today()
 
-    # Día 1 del mes: también enviar email de Booking Analytics
     if es_primer_dia_del_mes():
         log.info("  📅 Día 1 del mes — enviando solicitud Booking Analytics")
         enviar_email_booking_analytics()
 
-    # Stats generales
     precios = [r["precioFinal"] for r in results if r.get("precioFinal")]
     avg_price = round(sum(precios) / len(precios)) if precios else 0
     min_price = min(precios) if precios else 0
@@ -191,6 +306,9 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
     dias_techo = sum(1 for r in results if r.get("clampedBy") == "TECHO")
     dias_presion = sum(1 for r in results if r.get("presionTemporal"))
     dias_unc = sum(1 for r in results if r.get("uncUplift", 1.0) > 1.0)
+    dias_early_bird = sum(1 for r in results if r.get("earlyBird"))
+    dias_dynamic_floor = sum(1 for r in results if r.get("floorFactor", 1.0) < 1.0)
+    dias_claude = sum(1 for r in results if r.get("claudeAjuste"))
 
     if not audit.get("ok"):
         status = "❌ Errores detectados"
@@ -202,9 +320,9 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
         status = "✅ Todo estable"
         status_color = "#27ae60"
 
-    subject = f"📊 RMS v7.4 — {status} · {today.isoformat()}"
+    subject = f"📊 RMS v7.5 — {status} · {today.isoformat()}"
 
-    # Resumen por mes (próximos 6)
+    # Resumen por mes
     meses_resumen = {}
     for r in results:
         m = r["date"][:7]
@@ -213,7 +331,7 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
         mm = meses_resumen[m]
         mm["n"] += 1
         mm["reservadas"] += r.get("reservadas", 0)
-        mm["rev_otb"] += r.get("reservadas", 0) * r.get("precioFinal", 0) * 0.85  # genius
+        mm["rev_otb"] += r.get("reservadas", 0) * r.get("precioFinal", 0) * 0.85
         if r.get("clampedBy") == "SUELO":
             mm["suelos"] += 1
         if r.get("presionTemporal"):
@@ -236,6 +354,9 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
             <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:#888">{suelo_pct}%</td>
             <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;color:#e67e22">{mm['presion']}d</td>
         </tr>"""
+
+    # Beat-the-Best
+    btb_section = _build_btb_email_section(results)
 
     # Alertas
     alertas_html = ""
@@ -270,6 +391,27 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
             </tr>"""
         urgentes_html += "</table>"
 
+    # Señales v7.5 activas
+    signals_items = []
+    if dias_early_bird > 0:
+        signals_items.append(f"🐦 Early bird: <strong>{dias_early_bird}d</strong> con descuento anticipado (sep/oct)")
+    if dias_dynamic_floor > 0:
+        signals_items.append(f"📉 Suelo dinámico activo: <strong>{dias_dynamic_floor}d</strong>")
+    if dias_unc > 0:
+        signals_items.append(f"📈 Demanda no restringida: <strong>{dias_unc}d</strong>")
+    if dias_presion > 0:
+        signals_items.append(f"⏱️ Presión temporal: <strong>{dias_presion}d</strong>")
+    if dias_claude > 0:
+        signals_items.append(f"🧠 Ajuste IA aplicado: <strong>{dias_claude}d</strong>")
+
+    signals_html = ""
+    if signals_items:
+        signals_html = f"""
+        <h2 style="font-size:15px;color:#1a1a2e;margin-top:20px">⚙️ Señales v7.5 activas</h2>
+        <ul style="color:#555;font-size:13px;line-height:1.9">
+            {''.join(f'<li>{s}</li>' for s in signals_items)}
+        </ul>"""
+
     railway_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "rms-estanques-production.up.railway.app")
 
     html = f"""
@@ -277,7 +419,7 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
 
         <div style="background:{status_color};color:white;padding:20px;border-radius:8px 8px 0 0;">
             <h1 style="margin:0;font-size:20px;">{status}</h1>
-            <p style="margin:5px 0 0 0;opacity:0.9">{today.isoformat()} · RMS Estanques v7.4</p>
+            <p style="margin:5px 0 0 0;opacity:0.9">{today.isoformat()} · RMS Estanques v7.5</p>
         </div>
 
         <div style="background:#f8f9fa;padding:20px;">
@@ -294,6 +436,10 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
                 {filas_meses}
             </table>
 
+            {btb_section}
+
+            {signals_html}
+
             <table style="width:100%;border-collapse:collapse;margin-top:16px">
                 <tr>
                     <td style="padding:8px;border-bottom:1px solid #ddd"><strong>Precio medio 365d</strong></td>
@@ -307,14 +453,6 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
                     <td style="padding:8px;border-bottom:1px solid #ddd"><strong>Días en suelo / techo</strong></td>
                     <td style="padding:8px;border-bottom:1px solid #ddd;text-align:right">{dias_suelo}d suelo · {dias_techo}d techo</td>
                 </tr>
-                <tr>
-                    <td style="padding:8px;border-bottom:1px solid #ddd"><strong>Presión temporal activa</strong></td>
-                    <td style="padding:8px;border-bottom:1px solid #ddd;text-align:right">{dias_presion} fechas bajadas proactivamente</td>
-                </tr>
-                <tr>
-                    <td style="padding:8px"><strong>Uplift demanda no restringida</strong></td>
-                    <td style="padding:8px;text-align:right">{dias_unc} fechas</td>
-                </tr>
             </table>
 
             {alertas_html}
@@ -325,9 +463,9 @@ def enviar_email_diario(results, audit, alerts, claude_analysis=None):
         </div>
 
         <div style="background:#e9ecef;padding:12px 20px;border-radius:0 0 8px 8px;font-size:0.85em;color:#666">
-            RMS Estanques v7.4 · 
-            <a href="https://{railway_url}/explicacion" style="color:#0f3460">Ver precios</a> · 
-            <a href="https://{railway_url}/prices/compare" style="color:#0f3460">Comparativa</a> · 
+            RMS Estanques v7.5 ·
+            <a href="https://{railway_url}/explicacion" style="color:#0f3460">Ver precios</a> ·
+            <a href="https://{railway_url}/prices/compare" style="color:#0f3460">Comparativa</a> ·
             <a href="https://{railway_url}/revenue" style="color:#0f3460">Revenue</a>
         </div>
 
