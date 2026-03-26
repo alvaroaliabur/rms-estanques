@@ -242,6 +242,20 @@ def _detect_gaps_ground(gaps, otb_ground, today, horizon):
                 break
 
         if gap_length < 2:
+            # BUSINESS RULE: never accept 1-night stays anywhere.
+            # Block both room types with minStay=9.
+            gaps[date_str] = {
+                "gapLength": 1,
+                "daysOut": di,
+                "disponibles": disponibles,
+                "minStayGap": 9,
+                "premiumGap": 1.0,
+                "minStayGapGround": 9,
+                "premiumGapGround": 1.0,
+                "gapLengthGround": 1,
+                "roomType": "ground",
+                "surrounded": True,
+            }
             di += 1
             continue
 
