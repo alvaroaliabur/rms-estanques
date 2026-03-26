@@ -25,28 +25,47 @@ GROUND_FLOOR_PREMIUM = 1.10  # +10% sobre Upper Floor
 # SLOT OPENING BY SEASON
 # ══════════════════════════════════════════
 
-def get_open_slots(season_code):
+def get_open_slots(season_code, disponibles=9):
     """
-    Slots abiertos por temporada. Alineados con DEFAULT_MIN_STAY.
+    Slots abiertos por temporada Y disponibilidad.
 
-    UA/A  (minStay=5): STANDARD + 5N + 6N + 7N. Sin 4N — nunca menos de 5 noches.
-          STANDARD con minStay=5 acepta exactamente 5n al precio base.
-          5N/6N/7N son tarifas con descuento para esas duraciones.
-    MA/M  (minStay=3): Todo abierto, máxima flexibilidad.
-    B/MB  (minStay=2): Todo abierto, llenar.
+    Cuando quedan pocas unidades, cerrar slots de descuento:
+    no tiene sentido incentivar estancias largas con escasez real.
+
+    UA/A (minStay=5):
+      disp 1-2: solo STANDARD — escasez, precio pleno sin descuentos
+      disp 3-4: STANDARD + 7N — solo semana completa con descuento
+      disp 5+:  STANDARD + 5N + 6N + 7N — todos abiertos
+      4N: nunca en UA/A
+
+    MA/M (minStay=3):
+      disp 1-2: solo STANDARD
+      disp 3:   STANDARD + 5N + 6N + 7N (sin 4N)
+      disp 4+:  todos abiertos
+
+    B/MB (minStay=2): siempre todos abiertos — necesitamos volumen
     """
-    if season_code == "UA":
-        # minStay=5. STANDARD acepta 5n. 5N/6N/7N con descuento contenido.
-        # 4NOCHES cerrado: nunca menos de 5 noches en julio/agosto.
-        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
-    elif season_code == "A":
-        # minStay=5. Igual que UA — jun/sep mismo criterio.
-        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+    if season_code in ("UA", "A"):
+        if disponibles <= 2:
+            # Escasez real — precio pleno, sin incentivos de duración
+            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
+        elif disponibles <= 4:
+            # Poca disponibilidad — solo incentivar semana completa
+            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": True}
+        else:
+            # Disponibilidad normal — todos los slots salvo 4N
+            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+
     elif season_code in ("MA", "M"):
-        # minStay=3. Todo abierto, flexibilidad máxima.
-        return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+        if disponibles <= 2:
+            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
+        elif disponibles <= 3:
+            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+        else:
+            return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+
     else:
-        # B/MB: minStay=2. Todo abierto, llenar.
+        # B/MB: siempre todos abiertos — llenar es la prioridad
         return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
 
 
@@ -154,7 +173,8 @@ def build_calendar_entry(result, room_type="upper"):
     else:
         min_stay = result.get("minStay", 3)
 
-    open_slots = get_open_slots(sc)
+    disponibles = result.get("disponibles", 9)
+    open_slots = get_open_slots(sc, disponibles)
 
     entry = {"from": d, "to": d, "minStay": min_stay}
 
@@ -260,6 +280,6 @@ def aplicar_precios(results):
         log.info(f"  🏠 Ground floor: {diff_minstay} fechas con minStay diferente al upper")
     log.info(f"  🏠 Ground floor: +10% premium aplicado en {diff_price} fechas")
 
-    slot_count = sum(1 for r in results for s, o in get_open_slots(r.get("seasonCode", "M")).items() if o)
+    slot_count = sum(1 for r in results for s, o in get_open_slots(r.get("seasonCode", "M"), r.get("disponibles", 9)).items() if o)
     log.info(f"  ✅ Precios aplicados: {len(results)} fechas × 2 rooms, {slot_count} slots activos")
     return {"applied": True, "errors": []}
