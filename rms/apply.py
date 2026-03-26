@@ -25,48 +25,39 @@ GROUND_FLOOR_PREMIUM = 1.10  # +10% sobre Upper Floor
 # SLOT OPENING BY SEASON
 # ══════════════════════════════════════════
 
-def get_open_slots(season_code, disponibles=9):
+def get_open_slots(season_code, disponibles=9, min_stay=None):
     """
-    Slots abiertos por temporada Y disponibilidad.
+    Slots abiertos según la mínima estancia REAL del día.
 
-    Cuando quedan pocas unidades, cerrar slots de descuento:
-    no tiene sentido incentivar estancias largas con escasez real.
+    La Standard Rate ES el precio para la mínima estancia.
+    Las tarifas adicionales son descuentos para estancias MÁS LARGAS
+    que la mínima — incentivan que el huésped se quede más noches.
 
-    UA/A (minStay=5):
-      disp 1-2: solo STANDARD — escasez, precio pleno sin descuentos
-      disp 3-4: STANDARD + 7N — solo semana completa con descuento
-      disp 5+:  STANDARD + 5N + 6N + 7N — todos abiertos
-      4N: nunca en UA/A
+    Regla: abrir solo las tarifas con duración estrictamente mayor que min_stay.
 
-    MA/M (minStay=3):
-      disp 1-2: solo STANDARD
-      disp 3:   STANDARD + 5N + 6N + 7N (sin 4N)
-      disp 4+:  todos abiertos
+    Ejemplos:
+      min_stay=2 → abrir 4N, 5N, 6N, 7N (todas mayores)
+      min_stay=3 → abrir 4N, 5N, 6N, 7N
+      min_stay=5 → abrir 6N, 7N (4N y 5N son <=5)
+      min_stay=6 → abrir solo 7N
+      min_stay=7 → solo Semanal
 
-    B/MB (minStay=2): siempre todos abiertos — necesitamos volumen
+    Excepción: si quedan <=2 disponibles, cerrar todos los descuentos.
     """
-    if season_code in ("UA", "A"):
-        if disponibles <= 2:
-            # Escasez real — precio pleno, sin incentivos de duración
-            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
-        elif disponibles <= 4:
-            # Poca disponibilidad — solo incentivar semana completa
-            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": True}
-        else:
-            # Disponibilidad normal — todos los slots salvo 4N
-            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+    if disponibles <= 2:
+        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
 
-    elif season_code in ("MA", "M"):
-        if disponibles <= 2:
-            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
-        elif disponibles <= 3:
-            return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
-        else:
-            return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+    if min_stay is None:
+        from rms import config
+        min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
-    else:
-        # B/MB: siempre todos abiertos — llenar es la prioridad
-        return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+    return {
+        "STANDARD": True,
+        "4NOCHES": min_stay < 4,
+        "5NOCHES": min_stay < 5,
+        "6NOCHES": min_stay < 6,
+        "SEMANAL": min_stay < 7,
+    }
 
 
 # ══════════════════════════════════════════
@@ -174,7 +165,7 @@ def build_calendar_entry(result, room_type="upper"):
         min_stay = result.get("minStay", 3)
 
     disponibles = result.get("disponibles", 9)
-    open_slots = get_open_slots(sc, disponibles)
+    open_slots = get_open_slots(sc, disponibles, min_stay)
 
     entry = {"from": d, "to": d, "minStay": min_stay}
 
