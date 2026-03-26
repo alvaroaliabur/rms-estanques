@@ -2,3 +2,5 @@ flask>=3.0
 apscheduler>=3.10
 requests>=2.31
 anthropic>=0.40
+gspread>=6.0
+google-auth>=2.28
