@@ -1,6 +1,14 @@
 """
-Apply Prices — v7.2.2
-CHANGES from v7.2:
+Apply Prices — v7.2.3
+CHANGES from v7.2.2:
+  - v7.2.3: New minStay → rate plan mapping
+    minStay=2/3 → Standard + 4N + 5N + 6N + 7N
+    minStay=4   → 4N + 5N + 6N + 7N (Standard closed, 4N gets base price)
+    minStay=5   → 5N + 6N + 7N (5N gets base price)
+    minStay=6   → 6N + 7N (6N gets base price)
+    minStay=7   → 7N only (Semanal gets base price)
+    The "entry" rate plan (matching minStay) always gets the base price.
+    Longer-stay plans get duration discounts relative to that base.
   - v7.2.2: Ground floor pricing +10% premium over upper floor
     Ground floor = acceso jardín, terraza privada, producto premium.
     Applied at the price level, not as a multiplier on the final price.
@@ -25,38 +33,56 @@ GROUND_FLOOR_PREMIUM = 1.10  # +10% sobre Upper Floor
 # SLOT OPENING BY SEASON
 # ══════════════════════════════════════════
 
+# Map minStay to which rate plan is the "entry" (base price) rate
+MINSTAY_TO_ENTRY_SLOT = {
+    2: "STANDARD", 3: "STANDARD",
+    4: "4NOCHES", 5: "5NOCHES",
+    6: "6NOCHES", 7: "SEMANAL",
+}
+
+def _get_entry_slot(min_stay):
+    """Return the slot name that serves as the entry-level rate for a given minStay."""
+    return MINSTAY_TO_ENTRY_SLOT.get(min_stay, "STANDARD")
+
+
 def get_open_slots(season_code, disponibles=9, min_stay=None):
     """
     Slots abiertos según la mínima estancia REAL del día.
 
-    La Standard Rate ES el precio para la mínima estancia.
-    Las tarifas adicionales son descuentos para estancias MÁS LARGAS
-    que la mínima — incentivan que el huésped se quede más noches.
+    La tarifa de entrada es la que coincide con el minStay.
+    Las tarifas de duración superior ofrecen descuentos progresivos.
 
-    Regla: abrir solo las tarifas con duración estrictamente mayor que min_stay.
-
-    Ejemplos:
-      min_stay=2 → abrir 4N, 5N, 6N, 7N (todas mayores)
-      min_stay=3 → abrir 4N, 5N, 6N, 7N
-      min_stay=5 → abrir 6N, 7N (4N y 5N son <=5)
-      min_stay=6 → abrir solo 7N
-      min_stay=7 → solo Semanal
+    Regla completa:
+      min_stay=2 → Standard + 4N + 5N + 6N + 7N
+      min_stay=3 → Standard + 4N + 5N + 6N + 7N
+      min_stay=4 → 4N + 5N + 6N + 7N  (Standard cerrada)
+      min_stay=5 → 5N + 6N + 7N        (Standard y 4N cerradas)
+      min_stay=6 → 6N + 7N             (Standard, 4N, 5N cerradas)
+      min_stay=7 → 7N                  (solo Semanal)
 
     Excepción: si quedan <=2 disponibles, cerrar todos los descuentos.
     """
     if disponibles <= 2:
-        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": False, "6NOCHES": False, "SEMANAL": False}
+        # Protect revenue: only the entry-level rate, no discounts for longer stays
+        entry = _get_entry_slot(min_stay or config.DEFAULT_MIN_STAY.get(season_code, 3))
+        return {
+            "STANDARD": entry == "STANDARD",
+            "4NOCHES":  entry == "4NOCHES",
+            "5NOCHES":  entry == "5NOCHES",
+            "6NOCHES":  entry == "6NOCHES",
+            "SEMANAL":  entry == "SEMANAL",
+        }
 
     if min_stay is None:
         from rms import config
         min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
     return {
-        "STANDARD": True,
-        "4NOCHES": min_stay < 4,
-        "5NOCHES": min_stay < 5,
-        "6NOCHES": min_stay < 6,
-        "SEMANAL": min_stay < 7,
+        "STANDARD": min_stay <= 3,
+        "4NOCHES":  min_stay <= 4,
+        "5NOCHES":  min_stay <= 5,
+        "6NOCHES":  min_stay <= 6,
+        "SEMANAL":  min_stay <= 7,
     }
 
 
@@ -144,6 +170,15 @@ def build_calendar_entry(result, room_type="upper"):
     room_type: "upper" or "ground"
     - "ground" gets +10% premium on all prices (GROUND_FLOOR_PREMIUM)
     - "ground" uses independent minStay (minStayGround from results)
+
+    Rate plan logic:
+    - The "entry" rate plan (matching minStay) gets the base price.
+    - Rate plans for longer stays get duration discounts relative to base.
+    - When minStay <= 3: Standard is the entry rate.
+    - When minStay = 4: 4NOCHES is the entry rate (Standard closed).
+    - When minStay = 5: 5NOCHES is the entry rate (Standard, 4N closed).
+    - When minStay = 6: 6NOCHES is the entry rate (Standard, 4N, 5N closed).
+    - When minStay = 7: SEMANAL is the entry rate (all others closed).
     """
     d = result["date"]
     base = result["precioFinal"]
@@ -167,11 +202,15 @@ def build_calendar_entry(result, room_type="upper"):
     disponibles = result.get("disponibles", 9)
     open_slots = get_open_slots(sc, disponibles, min_stay)
 
+    # Determine the entry-level rate plan (gets base price, no discount)
+    entry_slot = _get_entry_slot(min_stay)
+
     entry = {"from": d, "to": d, "minStay": min_stay}
 
     for slot_name, field_name in SLOT_TO_FIELD.items():
         if open_slots.get(slot_name):
-            if slot_name == "STANDARD":
+            if slot_name == entry_slot:
+                # Entry rate: base price (this IS the minimum stay rate)
                 entry[field_name] = base
             else:
                 entry[field_name] = calc_duration_price(base, slot_name, occ, suelo, days_out, sc)
@@ -282,6 +321,6 @@ def aplicar_precios(results):
         log.info(f"  🏠 Ground floor: {diff_minstay} fechas con minStay diferente al upper")
     log.info(f"  🏠 Ground floor: +10% premium aplicado en {diff_price} fechas")
 
-    slot_count = sum(1 for r in results for s, o in get_open_slots(r.get("seasonCode", "M"), r.get("disponibles", 9)).items() if o)
+    slot_count = sum(1 for r in results for s, o in get_open_slots(r.get("seasonCode", "M"), r.get("disponibles", 9), r.get("minStay")).items() if o)
     log.info(f"  ✅ Precios aplicados: {len(results)} fechas × 2 rooms, {slot_count} slots activos")
     return {"applied": True, "errors": []}
