@@ -262,6 +262,13 @@ MIN_BOOKING_REVENUE = {
 }
 GENIUS_COMPENSATION = 1.18
 
+# Floor absoluto por mes (precio Genius) — P3 nunca puede bajar de aquí.
+# = ADR real 2025 (mejor año histórico). Nunca vendemos más barato que la media histórica.
+ADR_HISTORICAL_MIN = {
+    1: 68, 2: 79, 3: 85, 4: 115, 5: 139, 6: 201,
+    7: 282, 8: 308, 9: 184, 10: 140, 11: 82, 12: 101,
+}
+
 # ══════════════════════════════════════════
 # MIN STAY
 # ══════════════════════════════════════════
@@ -333,8 +340,9 @@ EVENTS_OVERLAP_RULE = "MAX"
 # ══════════════════════════════════════════
 V7 = {
     "MONTHLY_FLOOR_V7": {
-        1: 78, 2: 89, 3: 94, 4: 134, 5: 154, 6: 218,
-        7: 390, 8: 440, 9: 222, 10: 161, 11: 94, 12: 148,
+        # Floor = ADR real 2025 × 1.18 (nunca vender por debajo del promedio histórico)
+        1: 85, 2: 95, 3: 105, 4: 140, 5: 165, 6: 240,
+        7: 335, 8: 365, 9: 220, 10: 170, 11: 100, 12: 120,
     },
     "FORECAST": {
         "PACE_SENS": 0.30, "PACE_MIN": 0.80, "PACE_MAX": 1.20,
@@ -375,6 +383,7 @@ ALERTAS_ANOMALIAS = {
 # APIFY
 # ══════════════════════════════════════════
 APIFY_CONFIG = {
+    "enabled": False,  # Desactivado — BDC Analytics mensual es suficiente
     "ACTOR_ID": "voyager~booking-scraper",
     "COMP_SET_URLS": [
         "https://www.booking.com/hotel/es/apartamentos-piza.es.html",
@@ -404,6 +413,8 @@ CAPA_EVENTOS = {
     "MESES_ACTIVOS": [3, 4, 5, 6, 7, 8, 9, 10],
     "API_BASE": "https://openholidaysapi.org", "HORIZONTE_MESES": 12,
 }
+
+AIRROI_ENABLED = False  # Desactivado — MARKET_OCC no configurado, factor siempre 1.0
 
 MONTHLY_ALERTS = {"enabled": True, "threshold_warning": -0.10, "threshold_critical": -0.20}
 DEMAND_CURVE = {"PRICE_STEP": 10, "MIN_OBS_PER_RANGE": 20, "CEILING_MULTIPLIER": 1.50}
