@@ -524,7 +524,7 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
             if gap_info.get("premiumGapGround") and gap_info["premiumGapGround"] > los_premium:
                 los_premium = gap_info["premiumGapGround"]
 
-    if los_reduccion > 0 or gap_override:
+    if los_reduccion > 0 or gap_override or gap_override_ground:
         precio_pub = round(precio_pub * los_premium)
         precio_pub = max(suelo, min(techo, precio_pub))
 
