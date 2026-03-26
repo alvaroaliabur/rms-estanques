@@ -539,6 +539,26 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
         min_rev_applied = True
     precio_pub = max(suelo, min(techo, precio_pub))
 
+    # BUSINESS RULE: gap minStay reduction only if total net >= 300€.
+    # If the gap is physically too short or too cheap to generate 300€ net,
+    # block it (minStay=9) rather than selling below the minimum.
+    # Formula: precio_pub × gap_length × (1 - BOOKING_COMMISSION) >= MIN_NET_PER_BOOKING
+    MIN_NET = config.MIN_NET_PER_BOOKING    # 300€
+    COMMISSION = config.BOOKING_COMMISSION  # 0.15
+    if gap_override and gap_info:
+        gap_len = gap_info.get("gapLength", min_stay)
+        neto_gap = precio_pub * gap_len * (1 - COMMISSION)
+        if neto_gap < MIN_NET:
+            min_stay = 9  # bloquear — no llega a 300€ netos
+            gap_override = False
+            log.debug(f"    Gap bloqueado {date_str}: {gap_len}n × {precio_pub}€ = {neto_gap:.0f}€ neto < {MIN_NET}€")
+    if gap_override_ground and gap_info:
+        gap_len_g = gap_info.get("gapLengthGround", gap_info.get("gapLength", min_stay_ground))
+        neto_gap_g = precio_pub * gap_len_g * (1 - COMMISSION)
+        if neto_gap_g < MIN_NET:
+            min_stay_ground = 9
+            gap_override_ground = False
+
     return {
         "precioPublicado": precio_pub,
         "precioGenius": round(precio_pub * 0.85),
