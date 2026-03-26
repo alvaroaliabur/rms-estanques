@@ -92,10 +92,10 @@ OCC_HIGH = 0.75
 
 SLOT_TO_FIELD = {
     "STANDARD": "price1",
-    "6NOCHES": "price3",
-    "5NOCHES": "price4",
-    "4NOCHES": "price5",
-    "SEMANAL": "price10",
+    "6NOCHES": "price4",
+    "5NOCHES": "price5",
+    "4NOCHES": "price6",
+    "SEMANAL": "price7",
 }
 
 
