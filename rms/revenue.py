@@ -1,5 +1,12 @@
 """
-Revenue Tracker + Feedback — v7.6
+Revenue Tracker + Feedback — v7.7
+
+CAMBIOS v7.7 vs v7.6:
+  - COMPARATIVA MISMO MOMENTO DEL ANNO: bookingTime (bd) de Beds24.
+    diff_vs_now = OTB actual vs OTB mejor anno a misma fecha del calendario.
+    diff_pct sigue disponible como contexto (vs total final del anno).
+  - Airbnb commission corregida: 3% -> 15.5% (host-only fee oct 2025)
+
 
 CAMBIOS v7.6 vs v7.5:
   - REVENUE POR NOCHE DE ESTANCIA (no por mes de check-in)
@@ -184,8 +191,16 @@ def _fetch_bookings_for_year(year):
                 channel_raw = (b.get("apiSource") or "").strip().lower()
                 channel = _classify_channel(channel_raw)
 
+                # bookingTime = fecha en que se hizo la reserva (no check-in)
+                # Clave para comparar "mismo momento del año anterior"
+                bt_raw = b.get("bookingTime") or b.get("createdAt") or b["arrival"]
+                try:
+                    bd = date.fromisoformat(str(bt_raw)[:10])
+                except Exception:
+                    bd = ci
+
                 bookings.append({
-                    "ci": ci, "co": co,
+                    "ci": ci, "co": co, "bd": bd,
                     "nights": nights, "price": price,
                     "ppn": price / nights,
                     "year": year, "month": ci.month,
@@ -226,6 +241,38 @@ def _revenue_by_month(bookings):
     return {m: {"revenue": round(v["revenue"], 2), "nights": v["nights"]}
             for m, v in by_month.items()}
 
+
+def _revenue_by_month_at_date(bookings, cutoff):
+    """
+    Igual que _revenue_by_month() pero solo cuenta reservas hechas
+    ANTES O EN la fecha cutoff (b["bd"] <= cutoff).
+
+    Uso: calcular cuánto revenue OTB había en el mejor año histórico
+    en este mismo momento del año — comparativa justa con el presente.
+
+    Ejemplo:
+      cutoff = date(2025, 3, 26)  → solo reservas hechas hasta esa fecha
+      revenue OTB en julio 2025 a esa fecha = X€
+      hoy tenemos Y€ en julio 2026 → comparativa real vs mismo momento
+    """
+    by_month = defaultdict(lambda: {"revenue": 0.0, "nights": 0})
+    for b in bookings:
+        if b.get("bd") and b["bd"] > cutoff:
+            continue  # reserva hecha después del cutoff — no contabilizar
+        ci = b["ci"]
+        co = b["co"]
+        total_nights = b["nights"]
+        ppn = b["price"] / total_nights
+
+        current = ci
+        while current < co:
+            m = current.month
+            by_month[m]["revenue"] += ppn
+            by_month[m]["nights"] += 1
+            current += timedelta(days=1)
+
+    return {m: {"revenue": round(v["revenue"], 2), "nights": v["nights"]}
+            for m, v in by_month.items()}
 
 def _channel_breakdown(bookings):
     """Channel breakdown also distributed by stay night."""
@@ -297,6 +344,17 @@ def calcular_revenue_tracker():
     for year, bks in bookings_by_year.items():
         rev_by_year[year] = _revenue_by_month(bks)
 
+    # Para cada año histórico, calcular revenue OTB filtrado a "mismo momento"
+    # cutoff = hoy pero en el año histórico (ej: 2025-03-26 para comparar con 2026-03-26)
+    rev_by_year_at_today = {}
+    for year, bks in bookings_by_year.items():
+        if year < current_year:
+            try:
+                cutoff = today.replace(year=year)
+            except ValueError:
+                cutoff = today.replace(year=year, day=28)
+            rev_by_year_at_today[year] = _revenue_by_month_at_date(bks, cutoff)
+
     channel_ty = _channel_breakdown(bookings_by_year.get(current_year, []))
     channel_ly = _channel_breakdown(bookings_by_year.get(current_year - 1, []))
 
@@ -323,6 +381,7 @@ def calcular_revenue_tracker():
         best_nights = 0
         best_adr = 0
         best_revpar = 0
+        best_rev_now = 0  # revenue del mejor año filtrado a mismo momento del año
 
         for hy in historical_years:
             hy_data = rev_by_year.get(hy, {}).get(m, {"revenue": 0, "nights": 0})
@@ -334,6 +393,9 @@ def calcular_revenue_tracker():
                 hy_days = calendar.monthrange(hy, m)[1]
                 hy_avail = config.TOTAL_UNITS * hy_days
                 best_revpar = round(best_rev / hy_avail) if hy_avail > 0 else 0
+                # Revenue del mejor año a mismo momento (cutoff = hoy en ese año)
+                hy_now_data = rev_by_year_at_today.get(hy, {}).get(m, {"revenue": 0, "nights": 0})
+                best_rev_now = round(hy_now_data["revenue"])
 
         ly = rev_by_year.get(current_year - 1, {}).get(m, {"revenue": 0, "nights": 0})
         ly_rev = ly["revenue"]
@@ -343,6 +405,8 @@ def calcular_revenue_tracker():
         compare_rev = best_rev
         diff_pct = round((ty_rev - compare_rev) / compare_rev * 100) if compare_rev > 0 else (100 if ty_rev > 0 else 0)
         diff_vs_ly = round((ty_rev - ly_rev) / ly_rev * 100) if ly_rev > 0 else 0
+        # Comparativa vs mismo momento del mejor año (la más útil para meses futuros)
+        diff_vs_now = round((ty_rev - best_rev_now) / best_rev_now * 100) if best_rev_now > 0 else None
 
         is_past = m < today.month or (m == today.month and today.day > 15)
         status_type = "CERRADO" if is_past else "OTB"
@@ -363,7 +427,10 @@ def calcular_revenue_tracker():
             "ly_revenue": round(ly_rev), "ly_nights": ly_nights, "ly_adr": ly_adr,
             "best_revenue": round(best_rev), "best_year": best_year,
             "best_nights": best_nights, "best_adr": best_adr, "best_revpar": best_revpar,
-            "diff_pct": diff_pct, "diff_vs_ly": diff_vs_ly,
+            "best_rev_now": best_rev_now,   # revenue del mejor año a mismo momento del calendario
+            "diff_pct": diff_pct,           # vs total final del mejor año (contexto histórico)
+            "diff_vs_ly": diff_vs_ly,
+            "diff_vs_now": diff_vs_now,     # vs mismo momento del mejor año (comparativa justa)
             "compare_year": best_year, "status": status,
             "channels_ty": channel_ty.get(m, {}),
             "channels_ly": channel_ly.get(m, {}),
@@ -377,9 +444,11 @@ def calcular_revenue_tracker():
     for m in range(max(1, today.month - 1), min(13, today.month + 4)):
         t = tracker.get(m)
         if t and (t["ty_revenue"] > 0 or t["best_revenue"] > 0):
+            now_str = (f" | vs mismo momento: {t['diff_vs_now']:+d}%" if t.get('diff_vs_now') is not None else "")
             log.info(
-                f"    {t['name']}: {t['ty_revenue']:,.0f}€ ADR {t['ty_adr']}€ RevPAR {t['ty_revpar']}€ "
-                f"vs best({t['best_year']}) {t['best_revenue']:,.0f}€ ({t['diff_pct']:+d}%) — {t['status']}"
+                f"    {t['name']}: {t['ty_revenue']:,.0f}\u20ac ADR {t['ty_adr']}\u20ac RevPAR {t['ty_revpar']}\u20ac "
+                f"vs best({t['best_year']}) total {t['best_revenue']:,.0f}\u20ac ({t['diff_pct']:+d}%)"
+                f"{now_str} \u2014 {t['status']}"
             )
 
     return tracker
