@@ -191,6 +191,11 @@ def _build_dashboard(results):
         diff_rev = round((ty_rev - best_rev) / best_rev * 100) if best_rev > 0 else 0
         diff_sign = "+" if diff_rev >= 0 else ""
 
+        # v7.6: comparativa vs mismo momento del mejor año (diff_vs_now)
+        best_rev_now = rt.get("best_rev_now", 0)
+        _diff_vs_now_raw = rt.get("diff_vs_now", None)
+        diff_vs_now = round(_diff_vs_now_raw) if _diff_vs_now_raw is not None else None
+
         rev_for_btb = ty_rev if ty_rev > 0 else 0
         btb = _btb_status(m, rev_for_btb)
 
