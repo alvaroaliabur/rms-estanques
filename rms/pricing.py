@@ -441,6 +441,13 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
     floor_factor = get_dynamic_floor_factor(days_out, sc)
     suelo = max(35, round(suelo_base * floor_factor))
 
+    # HARD MINIMUM: P3 nunca puede bajar el floor por debajo del ADR histórico.
+    # Garantiza que nunca vendemos más barato que la media real del mejor año.
+    adr_min = getattr(config, 'ADR_HISTORICAL_MIN', {}).get(get_month(date_str), 0)
+    if adr_min > 0:
+        suelo_genius_min = round(adr_min * config.GENIUS_COMPENSATION)
+        suelo = max(suelo, suelo_genius_min)
+
     techo = _get_techo(sc, date_str)
 
     if event_info.get("floorOverride") and event_info["floorOverride"] > suelo:
