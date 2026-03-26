@@ -26,13 +26,27 @@ GROUND_FLOOR_PREMIUM = 1.10  # +10% sobre Upper Floor
 # ══════════════════════════════════════════
 
 def get_open_slots(season_code):
+    """
+    Slots abiertos por temporada. Alineados con DEFAULT_MIN_STAY.
+
+    UA/A  (minStay=5): STANDARD + 5N + 6N + 7N. Sin 4N — nunca menos de 5 noches.
+          STANDARD con minStay=5 acepta exactamente 5n al precio base.
+          5N/6N/7N son tarifas con descuento para esas duraciones.
+    MA/M  (minStay=3): Todo abierto, máxima flexibilidad.
+    B/MB  (minStay=2): Todo abierto, llenar.
+    """
     if season_code == "UA":
-        return {"STANDARD": False, "4NOCHES": False, "5NOCHES": False, "6NOCHES": True, "SEMANAL": True}
+        # minStay=5. STANDARD acepta 5n. 5N/6N/7N con descuento contenido.
+        # 4NOCHES cerrado: nunca menos de 5 noches en julio/agosto.
+        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
     elif season_code == "A":
-        return {"STANDARD": False, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
-    elif season_code == "MA":
-        return {"STANDARD": False, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+        # minStay=5. Igual que UA — jun/sep mismo criterio.
+        return {"STANDARD": True, "4NOCHES": False, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
+    elif season_code in ("MA", "M"):
+        # minStay=3. Todo abierto, flexibilidad máxima.
+        return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
     else:
+        # B/MB: minStay=2. Todo abierto, llenar.
         return {"STANDARD": True, "4NOCHES": True, "5NOCHES": True, "6NOCHES": True, "SEMANAL": True}
 
 
@@ -72,13 +86,19 @@ def calc_duration_price(base_price, slot_name, occ, suelo, days_out, season_code
     if not disc:
         return base_price
 
-    # UA/A: mostly same price, but allow modest discount for SEMANAL
-    # when booking far in advance (incentivize 2-week bookings)
+    # UA/A: escala progresiva — más noches = más descuento por noche.
+    # Pero el revenue TOTAL sube con las noches.
+    # 5N: -3%  → precio/noche casi igual, pequeño incentivo
+    # 6N: -6%  → descuento apreciable para semana completa
+    # 7N: -10% → descuento real para bloquear semana entera
+    # Revenue total: 5N < 6N < 7N siempre ✅
     if season_code in ("UA", "A"):
-        if slot_name == "SEMANAL" and days_out is not None and days_out > 60:
-            # 5% discount for weekly stays booked 60+ days out
-            # This incentivizes long stays that lock in revenue
-            return max(round(base_price * 0.95), round(suelo * 0.70))
+        if slot_name == "5NOCHES":
+            return max(round(base_price * 0.97), round(suelo * 0.87))
+        if slot_name == "6NOCHES":
+            return max(round(base_price * 0.94), round(suelo * 0.82))
+        if slot_name == "SEMANAL":
+            return max(round(base_price * 0.90), round(suelo * 0.78))
         return base_price
 
     # B/MB/M/MA: full dynamic discounts
