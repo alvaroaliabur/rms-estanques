@@ -268,12 +268,19 @@ def _call_claude(context):
         ],
     }
 
-    response = requests.post(
-        ANTHROPIC_API_URL,
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
+    try:
+        response = requests.post(
+            ANTHROPIC_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+    except requests.exceptions.Timeout:
+        log.warning("  Claude API timeout (>120s) — sin ajustes esta ejecución")
+        return None
+    except requests.exceptions.RequestException as e:
+        log.warning(f"  Claude API request error: {e}")
+        return None
 
     if response.status_code != 200:
         log.warning(f"  Claude API error: HTTP {response.status_code} — {response.text[:200]}")
