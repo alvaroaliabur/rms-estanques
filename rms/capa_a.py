@@ -1,23 +1,22 @@
 """
 Capa A — Dynamic Demand Curves from Beds24 Historical Data
-v7.1: Full rebuild with unconstrained demand estimation
+v7.5: DEMAND UNCONSTRAINING implementado.
 
-Replaces: construirCapaA, cargarCapaA_, extraerPreciosOptimos_, etc.
+El problema que resuelve:
+  Usar precios de 2023 (180€/noche agosto) para construir curvas de demanda
+  baja artificialmente los precios óptimos. 2025 vendió a 308€ — esa es
+  la realidad del mercado actual.
 
-PROCESS:
-1. Fetch all historical bookings from Beds24 (already done in otb.py)
-2. Expand each booking to night-level data with price ranges
-3. Group by demand segment (month × WD/WE)
-4. Build demand curve per segment: at each price point, how many units sold?
-5. Extract optimal price per availability level (revenue-maximizing)
-6. Apply unconstrained demand correction for high-occupancy segments
-7. Store in config.SEGMENT_BASE for use by pricing engine
+La solución (RM avanzado — "Demand Uncensoring"):
+  De 2023/2024 usamos el PATRÓN TEMPORAL (cuándo se reservó, a qué
+  antelación, WD/WE) pero RECALIBRAMOS los precios al nivel actual:
+    precio_recalibrado = precio_original × (ADR_2025 / ADR_año_original)
 
-CALIBRATION SCHEDULE:
-- Full rebuild: quarterly (Jan 1, Apr 1, Jul 1, Oct 1) or on demand
-- The daily pricing run uses the stored SEGMENT_BASE values
-- Between calibrations, unconstrained demand uplift in pricing.py
-  provides a real-time correction
+  Así tenemos 3x más observaciones para construir 48 segmentos
+  sin que los precios bajos de 2023 contaminen la curva.
+
+  Ejemplo: reserva agosto 2023 a 215€ → recalibrada a 215 × (308/215) = 308€
+  La observación contribuye a la curva con el precio correcto de hoy.
 """
 
 import logging
@@ -28,58 +27,67 @@ from rms.otb import fetch_historical_bookings
 
 log = logging.getLogger(__name__)
 
-# ══════════════════════════════════════════
-# CONSTANTS
-# ══════════════════════════════════════════
+PRICE_STEP = 10
+MIN_OBS_PER_RANGE = 20
+CEILING_MULTIPLIER = 1.50
+UNCONSTRAINED_OCC_THRESHOLD = 0.85
 
-PRICE_STEP = 10          # Group prices into €10 ranges
-MIN_OBS_PER_RANGE = 20   # Minimum observations for a price range to be "reliable"
-CEILING_MULTIPLIER = 1.50 # Ceiling = top price × 1.5
-UNCONSTRAINED_OCC_THRESHOLD = 0.85  # Inflate demand above this occupancy
-
-
-# ══════════════════════════════════════════
-# SEGMENT HELPERS  
-# ══════════════════════════════════════════
 
 def get_demand_segment_from_date(d):
-    """Month × WD/WE segment key."""
     m = d.month
     dt = "WE" if d.weekday() in (4, 5) else "WD"
     return f"{m}-{dt}"
 
 
-# ══════════════════════════════════════════
-# STEP 1: Expand bookings to night-level data
-# ══════════════════════════════════════════
-
 def expand_to_nights(bookings):
     """
-    Convert each booking to individual night records.
-    Each night gets: segment, price_range, weight (for multi-year weighting).
-    
-    Returns list of dicts: {segment, priceRange, weight, units}
+    v7.5 DEMAND UNCONSTRAINING:
+    Expand bookings to night-level data WITH price recalibration.
+
+    For years != reference_year, recalibrate prices:
+      ppn_recalibrado = ppn_original × (ADR_ref / ADR_año)
+
+    This preserves the temporal PATTERN (when bookings came in, WD/WE,
+    seasonality) while adjusting prices to current market level.
+
+    Example: Aug 2023 booking at 215€ → 215 × (308/215) = 308€
+    The observation contributes to demand curves at today's price.
     """
     nights_sold = []
-    
+
+    unc_cfg = config.DEMAND_UNCONSTRAINING if hasattr(config, 'DEMAND_UNCONSTRAINING') else {}
+    unc_enabled = unc_cfg.get("enabled", False)
+    adr_ref = unc_cfg.get("ADR_REFERENCE", {})
+    adr_by_year = unc_cfg.get("ADR_BY_YEAR", {})
+    ref_year = unc_cfg.get("reference_year", 2025)
+
+    recalibrated_count = 0
+
     for b in bookings:
         ci = b["ci"]
         co = b["co"]
         ppn = b["ppn"]
         year = b["year"]
-        
         if ppn <= 0:
             continue
-            
-        # Weight by year (recent years count more)
+
         weight = config.CURVE_WEIGHTS.get(year, 0.33)
-        
-        # Round price to nearest PRICE_STEP
-        price_range = round(ppn / PRICE_STEP) * PRICE_STEP
+
+        # DEMAND UNCONSTRAINING: recalibrate price for non-reference years
+        ppn_adjusted = ppn
+        if unc_enabled and year != ref_year:
+            month = ci.month
+            adr_this_year = adr_by_year.get(year, {}).get(month, 0)
+            adr_reference = adr_ref.get(month, 0)
+            if adr_this_year > 0 and adr_reference > 0:
+                factor = adr_reference / adr_this_year
+                ppn_adjusted = ppn * factor
+                recalibrated_count += 1
+
+        price_range = round(ppn_adjusted / PRICE_STEP) * PRICE_STEP
         if price_range < PRICE_STEP:
             price_range = PRICE_STEP
-        
-        # Expand to individual nights
+
         current = ci
         while current < co:
             seg = get_demand_segment_from_date(current)
@@ -90,21 +98,15 @@ def expand_to_nights(bookings):
                 "units": b.get("roomQty", 1),
             })
             current += timedelta(days=1)
-    
+
+    if recalibrated_count > 0:
+        log.info(f"  🔄 Demand Unconstraining: {recalibrated_count} reservas recalibradas al nivel {ref_year}")
+
     return nights_sold
 
 
-# ══════════════════════════════════════════
-# STEP 2: Count total available nights by segment
-# ══════════════════════════════════════════
-
 def count_total_nights_by_segment():
-    """
-    For each segment, count total unit-nights available across all historical years.
-    Weighted by CURVE_WEIGHTS.
-    """
     totals = defaultdict(float)
-    
     for year in config.HISTORICAL_YEARS:
         w = config.CURVE_WEIGHTS.get(year, 0.33)
         d = date(year, 1, 1)
@@ -113,35 +115,18 @@ def count_total_nights_by_segment():
             seg = get_demand_segment_from_date(d)
             totals[seg] += config.TOTAL_UNITS * w
             d += timedelta(days=1)
-    
     return dict(totals)
 
 
-# ══════════════════════════════════════════
-# STEP 3: Build demand curves
-# ══════════════════════════════════════════
-
 def build_demand_curves(nights_sold, total_nights_by_seg):
-    """
-    For each segment, build a demand curve:
-    - Group sold nights by price range
-    - Calculate probability of sale at each price
-    - Calculate expected revenue at each price
-    
-    Returns: {segment: {ranges: [{price, offered, sold, pVenta, ingEsp, fiable}]}}
-    """
-    # Aggregate sold units by segment × price range
     sold_by_seg_range = defaultdict(lambda: defaultdict(float))
-    
     for n in nights_sold:
         sold_by_seg_range[n["segment"]][n["priceRange"]] += n["weight"] * n["units"]
-    
+
     result = {}
-    
     for seg in sorted(sold_by_seg_range.keys()):
         total_avail = total_nights_by_seg.get(seg, 1)
         ranges = []
-        
         for price in sorted(sold_by_seg_range[seg].keys()):
             sold = sold_by_seg_range[seg][price]
             ranges.append({
@@ -152,45 +137,20 @@ def build_demand_curves(nights_sold, total_nights_by_seg):
                 "ingEsp": price * (sold / total_avail) if total_avail > 0 else 0,
                 "fiable": sold >= MIN_OBS_PER_RANGE,
             })
-        
         result[seg] = {"ranges": ranges}
-    
     return result
 
 
-# ══════════════════════════════════════════
-# STEP 4: Extract optimal prices per availability
-# ══════════════════════════════════════════
-
 def extract_optimal_prices(curves, total_nights_by_seg):
-    """
-    For each segment and each availability level (1-9 units free),
-    find the price that maximizes expected revenue.
-    
-    This is the core of the Capa A: 
-    revenue(price, disp) = price × min(demand_at_price, disp)
-    
-    We pick the price that maximizes this for each disp level.
-    
-    ★ NEW: Unconstrained demand correction ★
-    For segments with high historical occupancy, we inflate the
-    demand at high price ranges before computing optimal prices.
-    This makes the system more aggressive in high-demand periods.
-    """
     result = {}
-    
     for seg in sorted(curves.keys()):
         ranges = curves[seg]["ranges"]
         month = int(seg.split("-")[0])
         code = config.SEASON_CODE.get(month, "M")
-        
+
         total_nights = total_nights_by_seg.get(seg, 1)
-        dias_en_segmento = total_nights / config.TOTAL_UNITS
-        
-        if dias_en_segmento < 1:
-            dias_en_segmento = 1
-        
-        # Build demand-by-price array
+        dias_en_segmento = max(1, total_nights / config.TOTAL_UNITS)
+
         demand_by_price = []
         for r in ranges:
             demand_by_price.append({
@@ -199,30 +159,18 @@ def extract_optimal_prices(curves, total_nights_by_seg):
                 "fiable": r["fiable"],
             })
         demand_by_price.sort(key=lambda x: x["price"])
-        
-        # ★ UNCONSTRAINED DEMAND CORRECTION ★
-        # Calculate historical occupancy for this segment
+
         total_sold = sum(r["sold"] for r in ranges)
         occ_hist = total_sold / total_nights if total_nights > 0 else 0
-        
+
         if occ_hist > UNCONSTRAINED_OCC_THRESHOLD:
-            # Estimate turnaway probability
-            p_turnaway = (occ_hist - UNCONSTRAINED_OCC_THRESHOLD) / (1 - UNCONSTRAINED_OCC_THRESHOLD)
-            p_turnaway = min(p_turnaway, 1.0)
-            
-            # Inflate demand at TOP HALF of price ranges
-            # (the invisible demand was willing to pay HIGH prices)
+            p_turnaway = min((occ_hist - UNCONSTRAINED_OCC_THRESHOLD) / (1 - UNCONSTRAINED_OCC_THRESHOLD), 1.0)
             n_ranges = len(demand_by_price)
             top_half_start = n_ranges // 2
-            
             for i in range(top_half_start, n_ranges):
-                inflation = 1.0 + p_turnaway * 0.40  # Up to 40% more demand at high prices
+                inflation = 1.0 + p_turnaway * 0.40
                 demand_by_price[i]["demandaDiaria"] *= inflation
-            
-            log.debug(f"  {seg}: occ={occ_hist:.1%}, P(turnaway)={p_turnaway:.2f}, "
-                      f"inflating top {n_ranges - top_half_start} price ranges")
-        
-        # Build cumulative demand curve (higher price = less demand)
+
         demand_acum = []
         for i in range(len(demand_by_price)):
             acum = sum(d["demandaDiaria"] for d in demand_by_price[i:])
@@ -231,42 +179,31 @@ def extract_optimal_prices(curves, total_nights_by_seg):
                 "demandaDiaria": acum,
                 "fiable": demand_by_price[i]["fiable"],
             })
-        
-        # For each availability level, find revenue-maximizing price
+
         precios_por_disp = {}
         for disp in range(1, config.TOTAL_UNITS + 1):
             best_price = 0
             best_revenue = 0
-            best_demand = 0
-            
             for dp in demand_acum:
                 units_sold = min(dp["demandaDiaria"], disp)
                 revenue = dp["price"] * units_sold
                 if revenue > best_revenue:
                     best_revenue = revenue
                     best_price = dp["price"]
-                    best_demand = units_sold
-            
             precios_por_disp[disp] = {
                 "precio": best_price,
                 "revenue": round(best_revenue, 1),
-                "demanda": round(best_demand, 2),
             }
-        
-        # Calculate floor and ceiling
+
         suelo_m = precios_por_disp[config.TOTAL_UNITS]["precio"]
         suelo = max(35, round(suelo_m * 0.80))
-        
         techo = round(precios_por_disp[1]["precio"] * CEILING_MULTIPLIER)
         if techo < precios_por_disp[1]["precio"]:
             techo = round(precios_por_disp[1]["precio"] * 1.20)
-        
-        # Occupancy and average availability
-        disp_media = round(config.TOTAL_UNITS * (1 - occ_hist))
-        disp_media = max(1, min(config.TOTAL_UNITS, disp_media))
-        
+
+        disp_media = max(1, min(config.TOTAL_UNITS, round(config.TOTAL_UNITS * (1 - occ_hist))))
         base = precios_por_disp[disp_media]["precio"]
-        
+
         result[seg] = {
             "code": code,
             "base": base,
@@ -274,22 +211,13 @@ def extract_optimal_prices(curves, total_nights_by_seg):
             "techo": techo,
             "preciosPorDisp": precios_por_disp,
             "dispMedia": disp_media,
-            "occHistorica": round(occ_hist * 1000) / 10,  # As percentage with 1 decimal
+            "occHistorica": round(occ_hist * 1000) / 10,
         }
-    
+
     return result
 
 
-# ══════════════════════════════════════════
-# PUBLIC API
-# ══════════════════════════════════════════
-
 def cargar_capa_a():
-    """Load Capa A data into SEGMENT_BASE.
-    
-    Uses pre-computed values from config.py (from last GAS calibration).
-    These get overwritten when construir_capa_a() runs.
-    """
     seg_count = len(config.SEGMENT_BASE)
     if seg_count >= 20:
         log.info(f"  Capa A: {seg_count} segmentos cargados (from config)")
@@ -300,64 +228,52 @@ def cargar_capa_a():
 
 
 def construir_capa_a(force=False):
-    """
-    Full Capa A rebuild from Beds24 historical data.
-    
-    Should run:
-    - Quarterly (Jan 1, Apr 1, Jul 1, Oct 1)
-    - On demand (force=True)
-    
-    Updates config.SEGMENT_BASE in-place so the next pricing run
-    uses the new values.
-    """
     today = date.today()
-    
-    # Check if it's calibration day (1st of quarter) unless forced
     if not force:
         if today.day != 1 or today.month not in (1, 4, 7, 10):
             return None
-    
-    log.info("══ CONSTRUIR CAPA A ══")
-    
-    # Step 1: Fetch historical bookings
+
+    log.info("══ CONSTRUIR CAPA A v7.5 ══")
+    log.info(f"  Años históricos: {config.HISTORICAL_YEARS}")
+    log.info(f"  Pesos: {config.CURVE_WEIGHTS}")
+
     bookings = fetch_historical_bookings()
     if not bookings or len(bookings) < 50:
-        log.warning(f"  Solo {len(bookings) if bookings else 0} reservas — insuficiente para recalibrar")
+        log.warning(f"  Solo {len(bookings) if bookings else 0} reservas — insuficiente")
         return None
-    
-    log.info(f"  {len(bookings)} reservas históricas")
-    
-    # Step 2: Expand to night-level data
+
+    # Log bookings per year
+    by_year = defaultdict(int)
+    for b in bookings:
+        by_year[b["year"]] += 1
+    for y in sorted(by_year):
+        log.info(f"  {y}: {by_year[y]} reservas (peso={config.CURVE_WEIGHTS.get(y, 0)})")
+
+    log.info(f"  {len(bookings)} reservas históricas totales")
+
     nights_sold = expand_to_nights(bookings)
     log.info(f"  {len(nights_sold)} noches expandidas")
-    
-    # Step 3: Count total available nights
+
     total_nights = count_total_nights_by_segment()
-    
-    # Step 4: Build demand curves
     curves = build_demand_curves(nights_sold, total_nights)
     log.info(f"  {len(curves)} segmentos con curvas de demanda")
-    
-    # Step 5: Extract optimal prices (with unconstrained demand)
+
     segment_pricing = extract_optimal_prices(curves, total_nights)
-    
-    # Step 6: Update SEGMENT_BASE in-place
+
     for seg, pricing in segment_pricing.items():
         config.SEGMENT_BASE[seg] = pricing
-    
+
     log.info(f"  ✅ Capa A recalibrada: {len(segment_pricing)} segmentos")
-    
-    # Log key segments for verification
-    for seg in ["7-WD", "7-WE", "8-WD", "8-WE"]:
+
+    for seg in ["7-WD", "7-WE", "8-WD", "8-WE", "9-WD", "9-WE"]:
         if seg in segment_pricing:
             p = segment_pricing[seg]
             ppd = p["preciosPorDisp"]
             log.info(f"    {seg}: Disp1={ppd[1]['precio']}€, Disp5={ppd[5]['precio']}€, "
                      f"occ={p['occHistorica']}%, suelo={p['suelo']}, techo={p['techo']}")
-    
+
     return segment_pricing
 
 
 def check_and_recalibrate():
-    """Called daily — only recalibrates on quarterly dates."""
     return construir_capa_a(force=False)
