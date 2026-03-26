@@ -66,16 +66,6 @@ def get_open_slots(season_code, disponibles=9, min_stay=None):
     if min_stay is None:
         min_stay = config.DEFAULT_MIN_STAY.get(season_code, 3)
 
-    if disponibles <= 2:
-        entry = _get_entry_slot(min_stay)
-        return {
-            "STANDARD": entry == "STANDARD",
-            "4NOCHES":  entry == "4NOCHES",
-            "5NOCHES":  entry == "5NOCHES",
-            "6NOCHES":  entry == "6NOCHES",
-            "SEMANAL":  entry == "SEMANAL",
-        }
-
     if min_stay <= 2:
         return {
             "STANDARD": True,
