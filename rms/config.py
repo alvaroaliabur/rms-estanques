@@ -257,7 +257,15 @@ WEEKEND_FLOOR_PREMIUM = {
 # PRICE PROTECTION
 # ══════════════════════════════════════════
 PRICE_PROTECTION_BY_DAYS = {60: 0.95, 30: 0.85, 14: 0.75, 7: 0.60, 0: 0.00}
+# BUSINESS RULE: minimum 300€ net per booking after Booking.com commission (15%).
+# Formula: MIN_NET_PER_BOOKING / (1 - BOOKING_COMMISSION) = min published revenue per booking.
+# 300 / 0.85 = 353€ published minimum per booking.
+# With minStay=2 (absolute minimum): 353/2 = 177€/night minimum.
+# All MIN_BOOKING_REVENUE values below must satisfy: value * 0.85 >= 300.
+MIN_NET_PER_BOOKING = 300      # €, net to owner after Booking.com commission
+BOOKING_COMMISSION = 0.15      # 15% Booking.com standard commission
 MIN_BOOKING_REVENUE = {
+    # Revenue total en precio publicado. Neto = valor × 0.85 >= 300€ en todas.
     "B": 362, "MB": 362, "M": 550, "MA": 700, "A": 950, "UA": 2100,
 }
 GENIUS_COMPENSATION = 1.18
