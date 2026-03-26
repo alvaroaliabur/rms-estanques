@@ -506,12 +506,18 @@ def execute(fecha, precio_neto, fc, otb, sold_prices, gaps):
     gap_override_ground = False
     min_stay_ground = min_stay
 
-    if gap_info and not event_info.get("minStay"):
-        if gap_info.get("minStayGap") and gap_info["minStayGap"] < min_stay:
-            min_stay = gap_info["minStayGap"]
-            gap_override = True
-        if gap_info.get("premiumGap") and gap_info["premiumGap"] > los_premium:
-            los_premium = gap_info["premiumGap"]
+    if gap_info:
+        # Upper floor gap: only apply if no event minStay overrides it
+        if not event_info.get("minStay"):
+            if gap_info.get("minStayGap") and gap_info["minStayGap"] < min_stay:
+                min_stay = gap_info["minStayGap"]
+                gap_override = True
+            if gap_info.get("premiumGap") and gap_info["premiumGap"] > los_premium:
+                los_premium = gap_info["premiumGap"]
+
+        # Ground floor gap: ALWAYS apply, independent of events.
+        # Ground floor has its own booking pattern — a 3-night gap must
+        # accept 3-night bookings even if Semana Santa forces upper to 5.
         if gap_info.get("minStayGapGround"):
             min_stay_ground = gap_info["minStayGapGround"]
             gap_override_ground = True
