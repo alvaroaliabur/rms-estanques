@@ -235,13 +235,13 @@ NUNCA recomiendes bajar precios cuando:
 - Hay suelo dinámico activo (ya está por debajo del suelo nominal)
 - El mes tiene status 🏆 ON TRACK en Beat-the-Best
 
-Responde SOLO en JSON exacto:
+Responde SOLO en JSON exacto. IMPORTANTE: escribe "ajustes" PRIMERO en el JSON, antes que "analisis", para que no se trunque:
 {{
-  "analisis": "2-3 frases sobre la situación general y oportunidades detectadas",
-  "btb_comentario": "1 frase sobre el status Beat-the-Best y qué meses necesitan acción",
   "ajustes": [
     {{"fecha": "2026-07-01", "precio_actual": 320, "precio_recomendado": 340, "motivo": "..."}}
   ],
+  "analisis": "2-3 frases sobre la situación general y oportunidades detectadas",
+  "btb_comentario": "1 frase sobre el status Beat-the-Best y qué meses necesitan acción",
   "revenue_impact_estimado": "+X€ mensual"
 }}
 
@@ -262,7 +262,7 @@ def _call_claude(context):
 
     payload = {
         "model": MODEL,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "messages": [
             {"role": "user", "content": context}
         ],
