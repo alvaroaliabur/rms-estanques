@@ -226,37 +226,21 @@ def get_ground_floor_minstay(result):
     """
     Ground floor (1 unit) has independent minStay.
 
-    v7.2: Now uses minStayGround from results if available (set by
-    gap detection). Falls back to reducing upper minStay by 1.
-
-    v7.6 fix: minStayGround calculado por pricing.py siempre tiene
-    prioridad, con o sin gapOverrideGround. Sin este fix, el fallback
-    ignoraba minStayGround en temporadas protegidas (UA/A) cuando occ
-    del upper era baja, devolviendo min_stay=5 aunque el ground
-    tuviera un hueco de 2 noches perfectamente vendible.
+    v7.7: Simplified. minStayGround from pricing.py is authoritative —
+    it already incorporates gap detection, LOS dinámico, and season rules.
+    Only fall back to (upper minStay - 1) if minStayGround is missing.
     """
     gf = config.GROUND_FLOOR_LOS
     if not gf or not gf.get("enabled"):
         return result.get("minStay", 3)
 
-    # v7.6: minStayGround calculado explícitamente siempre tiene prioridad
+    # minStayGround from pricing engine is always authoritative
     ms_ground = result.get("minStayGround")
-    if ms_ground and ms_ground != result.get("minStay", 3):
+    if ms_ground is not None:
         return ms_ground
 
-    # gapOverrideGround activo: usar minStayGround sin condiciones
-    if result.get("gapOverrideGround") and ms_ground:
-        return ms_ground
-
-    sc = result.get("seasonCode", "M")
-    min_stay = result.get("minStay", 3)
-    occ = result.get("occNow", 0)
-
-    protected = gf.get("temporadas_protegidas", ["A", "UA"])
-    if sc in protected and occ < gf.get("upper_occ_threshold", 0.75):
-        return min_stay
-
-    return max(gf.get("absolute_min", 2), min_stay - 1)
+    # Fallback: same minStay as upper (only gaps can reduce)
+    return result.get("minStay", 3)
 
 
 # ══════════════════════════════════════════
