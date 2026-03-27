@@ -164,15 +164,22 @@ def _detect_gaps_upper(gaps, otb_upper, today, horizon):
             di += max(1, gap_length)
             continue
 
-        # Check if this is a real gap: are neighbors heavily booked?
-        # Look at day before and day after the gap
+        # Check if this is a real gap: blocked on BOTH sides.
+        # A gap only exists when availability == 0 before AND after,
+        # meaning the free nights cannot be extended in either direction.
+        # If either neighbor has availability > 0, the guest can book
+        # a longer stay — it's normal availability, not a gap.
         day_before = fmt(today + timedelta(days=max(0, di - 1)))
         day_after = fmt(today + timedelta(days=di + gap_length))
         disp_before = UPPER_UNITS - otb_upper.get(day_before, 0)
         disp_after = UPPER_UNITS - otb_upper.get(day_after, 0)
 
-        # It's a meaningful gap if bookings are high around it
-        is_surrounded = disp_before <= 2 or disp_after <= 2
+        is_surrounded = disp_before == 0 and disp_after == 0
+
+        # Not a real gap — availability can extend in at least one direction
+        if not is_surrounded:
+            di += max(1, gap_length)
+            continue
 
         season_code = config.SEASON_CODE[d.month]
         default_ms = config.DEFAULT_MIN_STAY.get(season_code, 3)
