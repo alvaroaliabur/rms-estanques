@@ -117,7 +117,7 @@ def detect_gaps_dinamico(otb, otb_by_type=None):
     """
     gaps = {}
     today = date.today()
-    horizon = 90  # Extended from 60
+    horizon = config.PRICING_HORIZON  # Must match pricing horizon so all gaps are detected
 
     if otb_by_type:
         # ═══ NEW: Per-type gap detection ═══
