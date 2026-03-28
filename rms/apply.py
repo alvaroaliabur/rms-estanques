@@ -268,10 +268,12 @@ def aplicar_precios(results):
         calendar_upper.append(entry_upper)
 
         # Ground floor: 1 unit — +10% premium + independent minStay
+        # IMPORTANTE: el ground floor SIEMPRE usa get_ground_floor_minstay()
+        # que lee minStayGround (seteado por _detect_gaps_ground).
+        # NUNCA hereda el gapOverride del upper floor — son unidades independientes.
+        # Un gap en upper (8 unidades) no implica gap en ground (1 unidad).
         entry_ground = build_calendar_entry(r, room_type="ground")
-        # Override minStay if not already set by gap detection
-        if not r.get("gapOverrideGround"):
-            entry_ground["minStay"] = get_ground_floor_minstay(r)
+        entry_ground["minStay"] = get_ground_floor_minstay(r)
         calendar_ground.append(entry_ground)
 
     # Send to Beds24 in batches of 30
