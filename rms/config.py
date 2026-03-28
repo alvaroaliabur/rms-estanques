@@ -1,16 +1,21 @@
 """
 RMS Estanques — Configuration
-v7.5 — 26 marzo 2026
+v7.6 — 28 marzo 2026
 
-CAMBIOS v7.5:
-- BEAT_THE_BEST: auditoría continua vs mejor año histórico por fecha
-  El RMS siempre intenta batir occ+ADR del mejor año para cada día/mes
-  La comparación es relativa a days_out: a 200d de agosto es normal tener 2/9
-- DEMAND_UNCONSTRAINING: recalibrar precios de años antiguos al nivel actual
-  De 2023/2024 usamos el patrón temporal pero recalibramos precios
-  precio_2023 × (ADR_2025 / ADR_2023) → la curva no baja precios
-- GOOGLE_CREDENTIALS_JSON para pickup persistente en Sheets
-- SOURCE_TOKEN para endpoint /source
+CAMBIOS v7.6 vs v7.5:
+- LAST_MINUTE_WINTER extendido a M y MA (abril, mayo, octubre):
+  con 3+ unidades libres a <10 días activa modo urgencia.
+  Level 2: 5+ libres a <5 días → suelo al 55%, sin protección de precio.
+- MIN_BOOKING_REVENUE bajado en temporadas bajas/medias para poder
+  vender la última unidad. Verano (A, UA) mantiene mínimos altos.
+- PRICE_PROTECTION_BY_DAYS más agresiva a corto plazo (7d: 0.50, 14d: 0.70).
+- ADR_HISTORICAL_MIN: floor absoluto Genius — el sistema nunca vende
+  por debajo del ADR real de 2025 en verano (protege precio medio).
+  En invierno/media temporada sí permite bajar para vender volumen.
+
+FILOSOFÍA:
+  B/MB/M/MA a <10 días: VENDER > precio. Unidad vacía = 0€.
+  A/UA: nunca por debajo del ADR histórico. El verano no se malvende.
 """
 
 import os
@@ -53,34 +58,14 @@ CURVE_WEIGHTS = {2023: 0.20, 2024: 0.35, 2025: 0.45}
 
 # ══════════════════════════════════════════
 # DEMAND UNCONSTRAINING — v7.5
-#
-# Problema: usar precios de 2023 (180€/noche en agosto) para construir
-# la curva de demanda baja artificialmente los precios óptimos.
-# 2025 vendió agosto a 308€ Genius — esa es la realidad del mercado.
-#
-# Solución (RM avanzado — "Demand Uncensoring"):
-# De años anteriores usamos el PATRÓN temporal (cuándo se reservó,
-# a qué antelación, WD/WE) pero recalibramos los precios:
-#   precio_recalibrado = precio_original × (ADR_referencia / ADR_año)
-#
-# Así 3 años de datos contribuyen volumen de observaciones
-# sin contaminar la curva de precios a la baja.
-#
-# ADR_REFERENCE: el nivel de precios "actual" (mejor año = 2025)
-# ADR_BY_YEAR: ADR medio por mes y año (de Beds24 real)
 # ══════════════════════════════════════════
 DEMAND_UNCONSTRAINING = {
     "enabled": True,
-    # Año de referencia para el nivel de precios
     "reference_year": 2025,
-    # ADR Genius real por mes del año de referencia (2025)
-    # Fuente: /revenue endpoint + Booking Analytics
     "ADR_REFERENCE": {
         1: 68, 2: 79, 3: 85, 4: 115, 5: 139, 6: 201,
         7: 282, 8: 308, 9: 184, 10: 140, 11: 70, 12: 85,
     },
-    # ADR Genius real por mes de años históricos
-    # Se usa para calcular el factor de recalibración
     "ADR_BY_YEAR": {
         2023: {
             1: 45, 2: 55, 3: 60, 4: 80, 5: 95, 6: 145,
@@ -99,27 +84,10 @@ DEMAND_UNCONSTRAINING = {
 
 # ══════════════════════════════════════════
 # BEAT THE BEST YEAR — v7.5
-#
-# Filosofía: el RMS siempre intenta batir ocupación Y precio
-# del mejor año histórico para cada fecha.
-#
-# Pero la comparación es RELATIVA A DAYS_OUT:
-# - A 200 días de agosto es normal tener 2/9 ocupados
-# - La pregunta no es "¿tengo menos que agosto 2025?"
-# - Sino "¿a estas mismas alturas, tenía más o menos?"
-# - Eso ya lo hace el pace ponderado de otb.py
-#
-# Lo que añadimos es:
-# 1. Target de revenue por mes = best year revenue × 1.05 (batir +5%)
-# 2. Auditoría en cada run: ¿voy ganando o perdiendo vs target?
-# 3. Si voy perdiendo en revenue → señal para pricing
-# 4. En email diario: semáforo por mes vs target
 # ══════════════════════════════════════════
 BEAT_THE_BEST = {
     "enabled": True,
-    "target_uplift": 1.00,  # Objetivo: SUPERAR el mejor año (sin colchón artificial)
-    # Revenue del mejor año por mes (se actualiza desde /revenue)
-    # Estos son valores semilla — el sistema los actualiza automáticamente
+    "target_uplift": 1.00,
     "BEST_REVENUE_BY_MONTH": {
         1: 3041, 2: 16800, 3: 21427, 4: 27089, 5: 33432, 6: 53156,
         7: 66895, 8: 82290, 9: 49559, 10: 31078, 11: 18285, 12: 18618,
@@ -149,9 +117,7 @@ BOOKING_ANALYTICS = {
 }
 
 # ══════════════════════════════════════════
-# SEGMENT BASE — Capa A (sin cambios vs v7.4)
-# Los precios de referencia son de 2025 (mejor año).
-# La Capa A recalibra trimestralmente con Demand Unconstraining.
+# SEGMENT BASE — Capa A (sin cambios vs v7.5)
 # ══════════════════════════════════════════
 SEGMENT_BASE = {
     "1-WD": {"code": "B",  "base": 40,  "suelo": 35,  "techo": 105,
@@ -233,7 +199,7 @@ DURATION_DISCOUNTS = {
 }
 
 # ══════════════════════════════════════════
-# FLOORS & CEILINGS (v7.4 — calibrados desde ADR real)
+# FLOORS & CEILINGS
 # ══════════════════════════════════════════
 SEASONAL_FLOOR = {
     "B": 75, "MB": 90, "M": 140, "MA": 165, "A": 235, "UA": 395,
@@ -255,20 +221,47 @@ WEEKEND_FLOOR_PREMIUM = {
 
 # ══════════════════════════════════════════
 # PRICE PROTECTION
+# v7.6: más agresiva a corto plazo para facilitar venta de últimas unidades
+# A <7 días: puede bajar hasta el 50% del precio medio vendido
+# A <14 días: puede bajar hasta el 70%
 # ══════════════════════════════════════════
-PRICE_PROTECTION_BY_DAYS = {60: 0.95, 30: 0.85, 14: 0.75, 7: 0.60, 0: 0.00}
-# BUSINESS RULE: minimum 300€ net per booking after Booking.com commission (15%).
-# 300 / 0.85 = 353€ published minimum per booking.
-# All values below satisfy: value * 0.85 >= 300.
-MIN_NET_PER_BOOKING = 300      # €, net to owner after Booking.com commission
-BOOKING_COMMISSION = 0.15      # 15% Booking.com standard commission
+PRICE_PROTECTION_BY_DAYS = {60: 0.95, 30: 0.85, 14: 0.70, 7: 0.50, 0: 0.00}
+
+# ══════════════════════════════════════════
+# MIN BOOKING REVENUE — v7.6
+#
+# FILOSOFÍA POR TEMPORADA:
+#   B/MB/M/MA: unidad vacía = 0€. Preferimos vender a precio bajo.
+#              El mínimo es lo que tiene sentido operativamente.
+#   A (jun/sep): nunca por debajo del ADR histórico Genius × minStay.
+#                Jun/sep: ~200€ Genius/noche × 5n = 1000€ min por reserva.
+#   UA (jul/ago): el verano no se malvende. Mínimo protege ADR medio.
+#                 282€ Genius/noche × 5n = 1410€. Usamos 1500€ con margen.
+#
+# Fórmula de comprobación: MIN_BOOKING_REVENUE / minStay = min €/noche publicado
+#   B:  320/3 = 107€/noche pub → Genius 91€  ✓ razonable invierno
+#   MB: 330/3 = 110€/noche pub → Genius 93€  ✓
+#   M:  390/3 = 130€/noche pub → Genius 110€ ✓ abril last-minute
+#   MA: 480/3 = 160€/noche pub → Genius 136€ ✓ mayo/oct last-minute
+#   A:  900/5 = 180€/noche pub → Genius 153€ ✓ jun/sep no se regala
+#   UA: 1500/5= 300€/noche pub → Genius 255€ ✓ jul/ago protegido
+# ══════════════════════════════════════════
+MIN_NET_PER_BOOKING = 300
+BOOKING_COMMISSION = 0.15
 MIN_BOOKING_REVENUE = {
-    "B": 362, "MB": 362, "M": 550, "MA": 700, "A": 950, "UA": 2100,
+    "B":  320,   # 107€/noche pub | Genius 91€  — invierno, vender volumen
+    "MB": 330,   # 110€/noche pub | Genius 93€  — mar/dic, idem
+    "M":  390,   # 130€/noche pub | Genius 110€ — abril, last-minute activo
+    "MA": 480,   # 160€/noche pub | Genius 136€ — may/oct, last-minute activo
+    "A":  900,   # 180€/noche pub | Genius 153€ — jun/sep, proteger ADR
+    "UA": 1500,  # 300€/noche pub | Genius 255€ — jul/ago, no malvender
 }
+
 GENIUS_COMPENSATION = 1.18
 
-# Floor absoluto por mes (precio Genius) — P3 nunca puede bajar de aquí.
-# = ADR real 2025 (mejor año histórico). Nunca vendemos más barato que la media histórica.
+# Floor absoluto Genius por mes — el sistema nunca vende más barato
+# que el ADR real de 2025 en temporada alta.
+# En invierno/media temporada NO aplica (queremos vender volumen).
 ADR_HISTORICAL_MIN = {
     1: 68, 2: 79, 3: 85, 4: 115, 5: 139, 6: 201,
     7: 282, 8: 308, 9: 184, 10: 140, 11: 82, 12: 101,
@@ -277,9 +270,6 @@ ADR_HISTORICAL_MIN = {
 # ══════════════════════════════════════════
 # MIN STAY
 # ══════════════════════════════════════════
-# minStay = estancia mínima para la tarifa STANDARD (price1).
-# UA/A: 5n mínimo — captura semanas cortas DE/NL con 4+ aptos libres.
-# El motor sube automáticamente cuando occ >= OCC_SUBIR_MINSTAY (85% UA).
 DEFAULT_MIN_STAY = {"B": 3, "MB": 3, "M": 3, "MA": 3, "A": 5, "UA": 5}
 MIN_STAY_REDUCTION = {
     "threshold_high": 0.70, "threshold_vhigh": 0.85,
@@ -292,9 +282,7 @@ MIN_STAY_REDUCTION = {
 # ══════════════════════════════════════════
 LOS_DINAMICO = {
     "enabled": True,
-    # ABSOLUTE_MIN: nunca bajar de aquí aunque el LOS dinámico lo pida.
-# BUSINESS RULE: nunca 1 noche en ningún caso.
-"ABSOLUTE_MIN": {"UA": 5, "A": 5, "MA": 3, "M": 3, "MB": 3, "B": 3},
+    "ABSOLUTE_MIN": {"UA": 5, "A": 5, "MA": 3, "M": 3, "MB": 3, "B": 3},
     "ESCALONES": [
         {"nombre": "HORIZONTE_LARGO", "dias_max": 999, "dias_min": 31,
          "reduccion": 0, "precio_premium": 1.00, "requiere_occ_baja": False},
@@ -314,14 +302,45 @@ LOS_DINAMICO = {
 }
 
 # ══════════════════════════════════════════
-# LAST MINUTE WINTER
+# LAST MINUTE — v7.6
+#
+# CAMBIO PRINCIPAL: extendido a M (abril) y MA (mayo, octubre).
+# Antes solo aplicaba a invierno (B, MB).
+#
+# TRIGGER:
+#   Level 1: temporada M/MA/B/MB + <10 días + 3+ unidades libres
+#            → suelo al 65%, protección de precio al 35%
+#            → permite bajar hasta ~65% del floor para vender
+#   Level 2: <5 días + 5+ unidades libres (emergencia real)
+#            → suelo al 55%, sin protección de precio
+#            → cualquier precio por encima del suelo mínimo vale
+#
+# IMPORTANTE: A/UA (jun-sep) NO tienen last-minute aquí.
+# En verano el motor normal ya gestiona urgencia vía PRICE_PROTECTION
+# y los mínimos de MIN_BOOKING_REVENUE protegen el ADR.
+#
+# EJEMPLO PRÁCTICO:
+#   Abril, 1 apto libre, 6 días: floor 115€ × 0.65 = 75€ pub → Genius 64€
+#   Abril, 4 aptos libres, 3 días: floor 115€ × 0.55 = 63€ pub → Genius 54€
+#   Mayo, 1 apto libre, 8 días: floor 139€ × 0.65 = 90€ pub → Genius 77€
 # ══════════════════════════════════════════
 LAST_MINUTE_WINTER = {
-    "enabled": True, "seasons": ["B", "MB"],
-    "max_days_out": 14, "min_units_free": 6,
-    "price_protection_override": 0.40, "factor_min_override": 0.60, "suelo_override_pct": 0.70,
-    "level2_days": 7, "level2_min_units": 7,
-    "level2_protection": 0.00, "level2_factor_min": 0.50, "level2_suelo_pct": 0.60,
+    "enabled": True,
+    # v7.6: añadidos M (abril) y MA (mayo, octubre)
+    "seasons": ["B", "MB", "M", "MA"],
+    # Activar cuando quedan <10 días y hay 3+ unidades libres
+    "max_days_out": 10,
+    "min_units_free": 3,
+    # Level 1: suelo al 65%, protección al 35% del precio medio vendido
+    "price_protection_override": 0.35,
+    "factor_min_override": 0.55,
+    "suelo_override_pct": 0.65,
+    # Level 2: emergencia — <5 días + 5+ libres → sin protección, suelo al 55%
+    "level2_days": 5,
+    "level2_min_units": 5,
+    "level2_protection": 0.00,
+    "level2_factor_min": 0.45,
+    "level2_suelo_pct": 0.55,
 }
 
 # ══════════════════════════════════════════
@@ -350,7 +369,6 @@ EVENTS_OVERLAP_RULE = "MAX"
 # ══════════════════════════════════════════
 V7 = {
     "MONTHLY_FLOOR_V7": {
-        # Floor = ADR real 2025 × 1.18 (nunca vender por debajo del promedio histórico)
         1: 85, 2: 95, 3: 105, 4: 140, 5: 165, 6: 240,
         7: 335, 8: 365, 9: 220, 10: 170, 11: 100, 12: 120,
     },
@@ -393,7 +411,7 @@ ALERTAS_ANOMALIAS = {
 # APIFY
 # ══════════════════════════════════════════
 APIFY_CONFIG = {
-    "enabled": False,  # Desactivado — BDC Analytics mensual es suficiente
+    "enabled": False,
     "ACTOR_ID": "voyager~booking-scraper",
     "COMP_SET_URLS": [
         "https://www.booking.com/hotel/es/apartamentos-piza.es.html",
@@ -424,7 +442,7 @@ CAPA_EVENTOS = {
     "API_BASE": "https://openholidaysapi.org", "HORIZONTE_MESES": 12,
 }
 
-AIRROI_ENABLED = False  # Desactivado — MARKET_OCC no configurado, factor siempre 1.0
+AIRroi_ENABLED = False
 
 MONTHLY_ALERTS = {"enabled": True, "threshold_warning": -0.10, "threshold_critical": -0.20}
 DEMAND_CURVE = {"PRICE_STEP": 10, "MIN_OBS_PER_RANGE": 20, "CEILING_MULTIPLIER": 1.50}
